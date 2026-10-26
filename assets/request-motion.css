@@ -1,0 +1,1287 @@
+/* DeepInfer 剖面 — M01 request lab. Scoped to [data-lab="request"].
+   The lab is a single request travelling through four real modules:
+   entry -> tokenizer -> Sequence -> waiting. Motion lives on the module
+   boundary (the handoff rails), not on a detached progress trace. */
+
+.lab--request {
+  --req-line: rgb(255 255 255 / 18%);
+  --req-line-strong: rgb(255 255 255 / 30%);
+  --req-panel: #102826;
+  --req-panel-deep: #0c201f;
+  --req-text: #f1ede0;
+  --req-muted: #a9c3ba;
+  --req-faint: #86a299;
+  --req-gold: #f0cc67;
+  --req-mint: #8bd2bd;
+}
+
+.lab--request .lab-head {
+  padding: 14px 17px 12px;
+}
+
+.lab--request .lab-kicker {
+  font-size: 10.5px;
+  line-height: 1.5;
+  letter-spacing: .035em;
+  margin-bottom: 4px;
+}
+
+.lab--request h3 {
+  font-size: clamp(22px, 2.1vw, 28px);
+  line-height: 1.25;
+}
+
+.lab--request .lab-count {
+  min-width: 58px;
+  padding: 5px 8px;
+  font-size: 13px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.lab--request .lab-canvas {
+  padding: 14px 16px 16px;
+}
+
+/* Input path selector: readable, still compact. */
+.lab--request .lab-params {
+  gap: 8px 12px;
+  padding: 0 0 10px;
+}
+
+.lab--request .param-label {
+  font-size: 12px;
+  color: var(--req-muted);
+}
+
+.lab--request .seg button {
+  min-height: 36px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.lab--request .lab-note {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--req-muted);
+}
+
+/* Player: controls sit directly above the mechanism so both stay in view. */
+.lab--request .req-player {
+  display: block;
+}
+
+.lab--request .req-transport {
+  margin: 0 0 12px;
+  padding: 10px 12px 9px;
+  border: 1px solid var(--req-line);
+  background:
+    linear-gradient(90deg, rgb(229 186 71 / 7%), transparent 58%),
+    var(--req-panel-deep);
+}
+
+.req-transport__main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 14px;
+  align-items: end;
+}
+
+.req-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.lab--request .req-buttons .control {
+  min-height: 40px;
+  padding: 6px 11px;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.lab--request .req-buttons .control--play {
+  min-width: 78px;
+  font-weight: 700;
+}
+
+.lab--request .req-buttons .control--reset {
+  margin-left: 0;
+  border-color: transparent;
+  color: #9db5ac;
+}
+
+.req-timebox {
+  min-width: 0;
+}
+
+.req-timebox__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 3px 12px;
+  color: var(--req-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.req-timebox__head label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.req-timebox__head label span {
+  color: var(--req-gold);
+}
+
+.req-scrub__time {
+  color: var(--req-gold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lab--request .req-timebox input[type="range"] {
+  display: block;
+  width: 100%;
+  height: 28px;
+  margin: 1px 0 0;
+  accent-color: var(--sulphur);
+  color-scheme: dark;
+  cursor: pointer;
+}
+
+.req-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.lab--request .req-steps .lab-step {
+  min-height: 30px;
+  padding: 3px 7px;
+  border-color: rgb(255 255 255 / 22%);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.lab--request .req-steps .lab-step.is-active {
+  color: var(--ink);
+  background: var(--sulphur);
+  border-color: var(--sulphur);
+}
+
+.lab--request .req-scrub__note {
+  display: block;
+  margin: 8px 2px 0;
+  color: var(--req-faint);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.lab--request .req-motion-note {
+  margin: 7px 0 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--sulphur);
+  color: var(--req-gold);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.lab--request .req-motion-note[hidden] {
+  display: none;
+}
+
+/* Stage and the request identity that persists across all four modules. */
+.lab--request .req-stage {
+  position: relative;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--req-line-strong);
+  background:
+    radial-gradient(circle at 8% 0%, rgb(229 186 71 / 8%), transparent 38%),
+    #0d2221;
+}
+
+.req-passport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 2px 2px 9px;
+  margin-bottom: 11px;
+  border-bottom: 1px dashed var(--req-line);
+}
+
+.req-passport__label {
+  color: var(--req-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: .04em;
+}
+
+.req-passport__id {
+  color: var(--req-gold);
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: .02em;
+}
+
+.req-passport__id.is-unset {
+  color: var(--req-faint);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.req-passport__meta {
+  color: #bdd2ca;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.req-passport__state {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid rgb(229 186 71 / 45%);
+  background: rgb(229 186 71 / 8%);
+  color: var(--req-gold);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* Desktop: four modules with three handoff rails between them. */
+.req-flow {
+  display: flex;
+  align-items: stretch;
+}
+
+.req-stop {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.req-module {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-height: 178px;
+  padding: 10px 11px;
+  border: 1px solid var(--req-line);
+  background: #122d2b;
+  transition: border-color .25s ease, background-color .25s ease, box-shadow .25s ease;
+}
+
+.req-stop.is-current .req-module {
+  border-color: rgb(229 186 71 / 88%);
+  background: #223b34;
+  box-shadow: inset 0 0 0 1px rgb(229 186 71 / 18%);
+}
+
+.req-stop.is-done .req-module {
+  border-color: rgb(105 185 164 / 50%);
+  background: #102a26;
+}
+
+.req-module__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 6px;
+  min-height: 19px;
+}
+
+.req-module__no {
+  color: var(--req-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.req-module__label {
+  color: #a6c8bd;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: .015em;
+}
+
+.req-stop.is-current .req-module__label {
+  color: var(--req-gold);
+}
+
+.req-pass {
+  margin-left: auto;
+  padding: 1px 5px;
+  border: 1px solid rgb(255 255 255 / 16%);
+  color: var(--req-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.req-pass.is-live {
+  border-color: rgb(229 186 71 / 48%);
+  background: rgb(229 186 71 / 8%);
+  color: var(--req-gold);
+}
+
+.req-pass.is-done {
+  border-color: rgb(139 210 189 / 38%);
+  background: rgb(139 210 189 / 7%);
+  color: var(--req-mint);
+}
+
+.req-module__headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 7px;
+  min-height: 26px;
+}
+
+.req-module__title {
+  color: var(--req-text);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.req-module__note {
+  margin: 0;
+  color: var(--req-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.req-module__fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin: 0;
+  color: var(--req-faint);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.req-module__fields b {
+  color: #e9e4d5;
+  font-weight: 600;
+}
+
+/* R0 stamp belongs to the prompt card, not to a separate trace. */
+.req-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 1px 0 1px 5px;
+  border-left: 1px dashed rgb(229 186 71 / 36%);
+  color: var(--req-gold);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity .22s ease, transform .22s ease, visibility .22s;
+}
+
+.req-stamp.is-in {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+}
+
+.req-stamp b {
+  padding: 0 5px;
+  background: var(--sulphur);
+  color: #102725;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.req-stamp:not(.has-id) b {
+  visibility: hidden;
+}
+
+.lab--request .token-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 4px;
+  min-height: 26px;
+  margin: 0;
+}
+
+.lab--request .token-strip .queue-empty {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--req-faint);
+}
+
+.lab--request .token-strip .queue-empty[hidden] {
+  display: none;
+}
+
+.lab--request .token {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 24px;
+  padding: 0 5px;
+  border: 1px solid rgb(255 255 255 / 26%);
+  background: #0b201f;
+  color: var(--req-text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.lab--request .token.is-in {
+  display: inline-flex;
+  animation: req-token-in .2s ease-out both;
+}
+
+.lab--request .token.is-provided {
+  display: inline-flex;
+  border-style: dashed;
+  color: #b8cec5;
+  opacity: .38;
+}
+
+.lab--request .token.is-provided.is-in {
+  border-style: solid;
+  color: var(--req-text);
+  opacity: 1;
+}
+
+.lab--request .token--defer.is-in {
+  animation-delay: calc(var(--i, 0) * 34ms);
+}
+
+.lab--request .token--mini {
+  min-width: 23px;
+  height: 20px;
+  padding: 0 3px;
+  font-size: 12px;
+}
+
+.lab--request .token-strip--seq {
+  min-height: 26px;
+  margin: 0;
+}
+
+.req-entry-ids {
+  min-height: 26px;
+}
+
+.req-entry-ids[hidden] {
+  display: none;
+}
+
+.lab--request .req-meter {
+  display: block;
+  width: 100%;
+  height: 4px;
+  margin: 1px 0 0;
+  overflow: hidden;
+  background: rgb(255 255 255 / 10%);
+  opacity: 0;
+  transition: opacity .2s ease;
+}
+
+.lab--request .req-meter.is-live {
+  opacity: 1;
+}
+
+.lab--request .req-meter i {
+  display: block;
+  width: calc(var(--req-encode, 0) * 100%);
+  height: 100%;
+  background: var(--sulphur);
+}
+
+.req-id-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 29px;
+  padding: 0 6px;
+  border: 1px solid rgb(229 186 71 / 62%);
+  color: var(--req-gold);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+/* The boundary object: one R0 courier per handoff. */
+.req-link {
+  position: relative;
+  display: flex;
+  flex: 0 0 94px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 0 3px;
+}
+
+.req-link__action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  color: var(--req-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.req-link.is-active .req-link__action {
+  color: var(--req-gold);
+}
+
+.req-link.is-done .req-link__action {
+  color: var(--req-mint);
+}
+
+.req-link__rail {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 34px;
+}
+
+.req-link__line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: rgb(255 255 255 / 22%);
+  transform: translateY(-50%);
+}
+
+.req-link__line::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: calc(var(--pass, 0) * 100%);
+  height: 100%;
+  background: var(--sulphur);
+  opacity: .8;
+}
+
+.req-link.is-done .req-link__line::after {
+  background: var(--req-mint);
+}
+
+.req-link__arrow {
+  position: absolute;
+  top: 50%;
+  right: -2px;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid var(--req-faint);
+  transform: translateY(-50%);
+}
+
+.req-link.is-active .req-link__arrow {
+  border-left-color: var(--req-gold);
+}
+
+.req-link.is-done .req-link__arrow {
+  border-left-color: var(--req-mint);
+}
+
+.req-courier {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--pass, 0) * 100%);
+  z-index: 3;
+  display: none;
+  align-items: center;
+  gap: 4px;
+  max-width: 88px;
+  padding: 2px 5px;
+  border: 1px solid rgb(229 186 71 / 82%);
+  background: #223d35;
+  color: var(--req-text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: nowrap;
+  box-shadow: 0 0 0 2px rgb(13 34 33 / 82%);
+  transform: translate(-50%, -50%);
+}
+
+.req-link.is-visible .req-courier {
+  display: inline-flex;
+}
+
+.req-link.is-starting .req-courier {
+  left: 0;
+  transform: translate(0, -50%);
+}
+
+.req-link.is-arrived .req-courier {
+  left: 100%;
+  transform: translate(-100%, -50%);
+}
+
+.req-link.is-active .req-courier {
+  box-shadow:
+    0 0 0 2px rgb(13 34 33 / 82%),
+    0 0 0 4px rgb(229 186 71 / 13%);
+}
+
+.req-courier b {
+  color: var(--sulphur);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.req-courier__meta {
+  max-width: 42px;
+  overflow: hidden;
+  color: #c9dad3;
+  text-overflow: ellipsis;
+}
+
+/* waiting is a CPU queue, visually distinct from a device queue. */
+.lab--request .queue-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 7px;
+  min-height: 42px;
+  margin: 0;
+  padding: 5px 7px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  background: rgb(0 0 0 / 10%);
+}
+
+.lab--request .queue-box__label {
+  color: var(--req-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.lab--request .queue-box .queue-empty {
+  color: var(--req-faint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.lab--request .queue-empty[hidden] {
+  display: none;
+}
+
+.req-queue-ticket {
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px 5px;
+  border: 1px solid rgb(229 186 71 / 48%);
+  background: rgb(229 186 71 / 8%);
+}
+
+.req-queue-ticket.is-in {
+  display: inline-flex;
+  animation: req-queue-in .28s ease-out both;
+}
+
+.req-queue-ticket b {
+  color: var(--sulphur);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.req-queue-tokens {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+/* The full object dossier stays out of the mechanism's reading space. */
+.lab--request .req-dossier {
+  display: block;
+  margin: 0 16px 14px;
+  border: 1px solid var(--req-line);
+  background: var(--req-panel);
+}
+
+.req-dossier summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  color: #cfe0d8;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  list-style: none;
+  cursor: pointer;
+}
+
+.req-dossier summary::-webkit-details-marker {
+  display: none;
+}
+
+.req-dossier summary::before {
+  content: "+";
+  flex: 0 0 auto;
+  color: var(--req-gold);
+  font-size: 14px;
+}
+
+.req-dossier[open] summary::before {
+  content: "−";
+}
+
+.req-dossier__hint {
+  margin-left: auto;
+  color: var(--req-muted);
+  font-size: 11.5px;
+  text-align: right;
+}
+
+.req-dossier__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 18px;
+  padding: 2px 12px 10px;
+  border-top: 1px dashed var(--req-line);
+}
+
+.lab--request .req-dossier .field-row {
+  padding: 4px 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.lab--request .req-dossier .field-row span:first-child {
+  color: var(--req-muted);
+}
+
+.lab--request .req-dossier .field-row span:last-child {
+  font-size: 12px;
+  color: var(--req-text);
+}
+
+.lab--request .req-dossier .field-row span:last-child.is-new {
+  animation: req-field-flash .5s ease-out;
+}
+
+.lab--request .req-note {
+  margin: 10px 0 0;
+  color: var(--req-muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Static narrative and footer must stay readable, not caption-sized. */
+.lab--request .lab-state {
+  padding: 11px 16px;
+}
+
+.lab--request .lab-state .tag {
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.lab--request .lab-state p {
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.lab--request .lab-foot {
+  padding: 10px 16px 12px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: #9eb8af;
+}
+
+.lab--request .lab-foot b {
+  color: #d5e2dc;
+}
+
+@keyframes req-token-in {
+  from { opacity: 0; transform: translateY(3px) scale(.96); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes req-queue-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes req-field-flash {
+  0% { color: #fff; background: rgb(229 186 71 / 22%); }
+  100% { color: var(--req-text); background: transparent; }
+}
+
+/* Tablet and phone: the same pipeline becomes a vertical assembly line.
+   The controls stay attached to the top of the stage; the dossier and
+   the static note move below the mechanism. */
+@media (max-width: 980px) {
+  .lab--request .lab-canvas {
+    padding: 11px 10px 12px;
+  }
+
+  .lab--request .req-transport {
+    margin-bottom: 9px;
+    padding: 8px 9px 8px;
+  }
+
+  .req-transport__main {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .req-buttons {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr 1fr .9fr;
+    gap: 5px;
+  }
+
+  .lab--request .req-buttons .control {
+    min-width: 0;
+    min-height: 40px;
+    padding: 5px 6px;
+    font-size: 12px;
+  }
+
+  .lab--request .req-buttons .control--play {
+    min-width: 0;
+  }
+
+  .req-timebox__head {
+    font-size: 11.5px;
+  }
+
+  .lab--request .req-timebox input[type="range"] {
+    height: 26px;
+  }
+
+  .lab--request .req-steps {
+    display: none;
+  }
+
+  .lab--request .req-stage {
+    padding: 8px 8px 9px;
+  }
+
+  .req-passport {
+    gap: 3px 7px;
+    padding: 1px 1px 7px;
+    margin-bottom: 7px;
+  }
+
+  .req-passport__label {
+    font-size: 11px;
+  }
+
+  .req-passport__id {
+    font-size: 14px;
+  }
+
+  .req-passport__meta {
+    font-size: 11.5px;
+  }
+
+  .req-passport__state {
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+
+  .req-flow {
+    flex-direction: column;
+  }
+
+  .req-stop {
+    flex: 0 0 auto;
+  }
+
+  .req-module {
+    min-height: 0;
+    gap: 4px;
+    padding: 8px 9px 8px;
+  }
+
+  .req-module__head {
+    min-height: 18px;
+    gap: 2px 5px;
+  }
+
+  .req-module__no {
+    font-size: 10px;
+  }
+
+  .req-module__label {
+    font-size: 11.5px;
+  }
+
+  .req-pass {
+    padding: 1px 4px;
+    font-size: 10.5px;
+  }
+
+  .req-module__headline {
+    min-height: 23px;
+    gap: 4px 6px;
+  }
+
+  .req-module__title {
+    font-size: 15px;
+  }
+
+  .req-module__note {
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+
+  .req-module__fields {
+    gap: 1px 7px;
+    font-size: 11px;
+  }
+
+  .req-stamp {
+    padding-left: 4px;
+    font-size: 10.5px;
+  }
+
+  .req-stamp b {
+    font-size: 11.5px;
+  }
+
+  .lab--request .token {
+    min-width: 29px;
+    height: 23px;
+    padding: 0 4px;
+    font-size: 13px;
+  }
+
+  .lab--request .token--mini {
+    min-width: 22px;
+    height: 19px;
+    font-size: 11.5px;
+  }
+
+  .lab--request .token-strip {
+    min-height: 24px;
+    gap: 4px;
+  }
+
+  .lab--request .token-strip--seq {
+    min-height: 24px;
+  }
+
+  .lab--request .queue-box {
+    min-height: 36px;
+    padding: 4px 6px;
+  }
+
+  .req-id-chip {
+    min-width: 27px;
+    font-size: 13px;
+  }
+
+  .lab--request [data-req-seq-note] {
+    display: none;
+  }
+
+  /* Vertical handoff: a short rail on the left, action copy on the right. */
+  .req-link {
+    display: grid;
+    grid-template-columns: 30px minmax(0, 1fr);
+    grid-template-rows: auto;
+    align-items: center;
+    column-gap: 7px;
+    flex: 0 0 32px;
+    padding: 2px 0;
+  }
+
+  .req-link__action {
+    grid-column: 2;
+    grid-row: 1;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 0;
+    font-size: 11.5px;
+    line-height: 1.35;
+    text-align: left;
+  }
+
+  .req-link__rail {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: center;
+    width: 30px;
+    height: 32px;
+  }
+
+  .req-link__line {
+    top: 0;
+    right: auto;
+    bottom: 0;
+    left: 50%;
+    width: 2px;
+    height: auto;
+    transform: translateX(-50%);
+  }
+
+  .req-link__line::after {
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: calc(var(--pass, 0) * 100%);
+  }
+
+  .req-link__arrow {
+    top: auto;
+    right: auto;
+    bottom: -2px;
+    left: 50%;
+    border-top: 7px solid var(--req-faint);
+    border-right: 5px solid transparent;
+    border-bottom: 0;
+    border-left: 5px solid transparent;
+    transform: translateX(-50%);
+  }
+
+  .req-link.is-active .req-link__arrow {
+    border-top-color: var(--req-gold);
+    border-left-color: transparent;
+  }
+
+  .req-link.is-done .req-link__arrow {
+    border-top-color: var(--req-mint);
+    border-left-color: transparent;
+  }
+
+  .req-courier {
+    top: calc(var(--pass, 0) * 100%);
+    left: 50%;
+    max-width: 34px;
+    padding: 1px 4px;
+    font-size: 10.5px;
+    transform: translate(-50%, -50%);
+  }
+
+  .req-courier b {
+    font-size: 11px;
+  }
+
+  .req-courier__meta {
+    display: none;
+  }
+
+  .req-link.is-starting .req-courier {
+    top: 0;
+    left: 50%;
+    transform: translate(-50%, 0);
+  }
+
+  .req-link.is-arrived .req-courier {
+    top: 100%;
+    left: 50%;
+    transform: translate(-50%, -100%);
+  }
+
+  .lab--request .req-scrub__note {
+    margin-top: 7px;
+    font-size: 11px;
+  }
+
+  .lab--request .req-note {
+    margin-top: 8px;
+    font-size: 11.5px;
+  }
+
+  .lab--request .req-dossier {
+    margin: 0 10px 10px;
+  }
+
+  .req-dossier summary {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .req-dossier__hint {
+    font-size: 11px;
+  }
+
+  .req-dossier__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 14px;
+    padding: 2px 10px 9px;
+  }
+
+  .lab--request .lab-state {
+    padding: 9px 11px;
+  }
+
+  .lab--request .lab-state p {
+    font-size: 13px;
+  }
+
+  .lab--request .lab-foot {
+    padding: 9px 11px 10px;
+    font-size: 11.5px;
+  }
+}
+
+@media (max-width: 430px) {
+  .lab--request .lab-head {
+    padding: 12px 12px 10px;
+  }
+
+  .lab--request .lab-kicker {
+    font-size: 10px;
+  }
+
+  .lab--request h3 {
+    font-size: 21px;
+  }
+
+  .lab--request .lab-count {
+    min-width: 52px;
+    font-size: 12px;
+  }
+
+  .lab--request .lab-params {
+    gap: 6px 10px;
+    padding-bottom: 8px;
+  }
+
+  .lab--request .param-label {
+    font-size: 11.5px;
+  }
+
+  .lab--request .seg button {
+    min-height: 34px;
+    padding: 4px 8px;
+    font-size: 11.5px;
+  }
+
+  .lab--request .lab-note {
+    flex-basis: 100%;
+    font-size: 11px;
+  }
+
+  .req-buttons {
+    grid-template-columns: 1.15fr .95fr .95fr .8fr;
+    gap: 4px;
+  }
+
+  .lab--request .req-buttons .control {
+    font-size: 11.5px;
+  }
+
+  .req-timebox__head {
+    font-size: 11px;
+  }
+
+  .req-scrub__time {
+    font-size: 11px;
+  }
+
+  .req-passport {
+    gap: 2px 6px;
+  }
+
+  .req-passport__meta {
+    flex-basis: 100%;
+    order: 4;
+  }
+
+  .req-passport__state {
+    order: 3;
+  }
+
+  .req-module {
+    padding: 7px 8px 8px;
+  }
+
+  .req-module__label {
+    font-size: 11px;
+  }
+
+  .req-module__note {
+    font-size: 11px;
+  }
+
+  .lab--request .token {
+    min-width: 28px;
+    height: 22px;
+    padding: 0 3px;
+    font-size: 12.5px;
+  }
+
+  .lab--request .token--mini {
+    min-width: 21px;
+    height: 18px;
+    font-size: 11px;
+  }
+
+  .req-link {
+    flex-basis: 30px;
+  }
+
+  .req-link__rail {
+    height: 30px;
+  }
+
+  .req-link__action {
+    font-size: 11px;
+  }
+
+  .lab--request .lab-state p {
+    font-size: 12.5px;
+  }
+
+  .req-dossier__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lab--request *,
+  .lab--request *::before,
+  .lab--request *::after {
+    animation-duration: .001ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

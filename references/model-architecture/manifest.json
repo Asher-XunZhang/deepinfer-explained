@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "model_repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+  "retrieved_date": "2026-10-26",
+  "retrieved_date_timezone": "Asia/Shanghai",
+  "tree_source_url": "https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/tree/1bae0e1088993b9b82de08f59de5be5a34e42170?recursive=true&expand=false",
+  "selection_reason": "Official model definitions requested for structural reading; these are HF model reference files, not DeepInfer engine source. This is not a runnable inference package.",
+  "download_allowlist": [
+    "inference/model.py",
+    "inference/engram.py",
+    "inference/vision.py"
+  ],
+  "downloaded_files": [
+    {
+      "path": "inference/model.py",
+      "role": "official-model-architecture-source-reference",
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/resolve/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/model.py",
+      "source_browser_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/model.py",
+      "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+      "size_bytes": 61669,
+      "sha256": "e5decd76fe70fd56ef2f10124d245c6f64fb6a0003cc9068a1d3182a168b8d2d",
+      "git_blob_sha1": "46cc8310bb64852f3c36c9cc5dd13d47acabf6ee"
+    },
+    {
+      "path": "inference/engram.py",
+      "role": "official-model-architecture-source-reference",
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/resolve/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/engram.py",
+      "source_browser_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/engram.py",
+      "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+      "size_bytes": 8138,
+      "sha256": "11f35ecbead8150c35aa002b3d180ef290b05a25afe883a11884f94d476d3897",
+      "git_blob_sha1": "a36bc6c6b8cbf2d3dbac850863c23b55a7ecb5c7"
+    },
+    {
+      "path": "inference/vision.py",
+      "role": "official-model-architecture-source-reference",
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/resolve/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/vision.py",
+      "source_browser_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/vision.py",
+      "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+      "size_bytes": 4457,
+      "sha256": "5d49edc196a4ef22384abe76d35a40098cbe1e74b586c8f66a2edff4f076b26c",
+      "git_blob_sha1": "77af0bdef9f4649edebac2876cd1df50a147ce98"
+    }
+  ],
+  "excluded": [
+    "inference/kernel.py",
+    "inference/convert.py",
+    "inference/generate.py",
+    "inference/run.sh",
+    "inference/image_processor.py",
+    "weights",
+    "weight-index",
+    "tokenizer-vocabularies",
+    "media",
+    "DeepInfer-engine-source"
+  ],
+  "license": "MIT; upstream license preserved at ../model-config/LICENSE",
+  "verification": {
+    "size_matches_pinned_tree": true,
+    "git_blob_sha1_matches_pinned_tree": true,
+    "sha256_computed_after_download": true,
+    "snapshot_download_used": false,
+    "source_imported_or_executed": false
+  }
+}

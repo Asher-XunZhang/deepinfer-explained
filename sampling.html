@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="zh-CN" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>采样、DSpark 与结构约束：从候选分布到 token | DeepInfer 剖面</title>
+  <meta name="description" content="DeepInfer 采样与验证机制导读：hidden→logits→候选分布→token，DSpark 草稿、验证、连续接受前缀与首拒绝重采样，confidence 预算分配 5→[3,2]，结构化输出的编译、mask 与状态推进。固定 SHA，含可暂停的连续时间轴与参数分支。">
+  <meta name="color-scheme" content="light">
+  <meta property="og:title" content="采样、DSpark 与结构约束 | DeepInfer 剖面">
+  <meta property="og:description" content="模型给的是分布，不是已经选好的答案。连续跟踪候选、草稿验证和合法 token 的生成。">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/navigation.css">
+  <link rel="stylesheet" href="assets/output.css">
+  <script>document.documentElement.classList.remove('no-js');document.documentElement.classList.add('js');</script>
+  <script src="assets/output.js" defer></script>
+</head>
+<body class="unit-page sample-page">
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="version-bar">
+  <div class="wrap version-bar__in">
+    <span>固定源码 <code>5537415</code></span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>分析日期 2026-10-26</span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>静态源码阅读，无 GPU 实测</span>
+    <a href="index.html#boundary">证据边界</a>
+  </div>
+</div>
+
+<header class="site-header">
+  <div class="wrap site-header__in">
+    <a class="brand" href="index.html" aria-label="DeepInfer 剖面首页">
+      <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
+        <path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/>
+        <path class="brand__cut" d="M5 19h30M18 8v24"/>
+      </svg>
+      <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+    </a>
+    <nav class="primary-nav" aria-label="全站导航">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html" aria-current="page">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+    </nav>
+    <span class="header-status"><i aria-hidden="true"></i>章节 04</span>
+  </div>
+</header>
+
+<div class="unit-ribbon">
+  <div class="wrap unit-ribbon__in">
+    <span class="unit-ribbon__label">MECHANICS / 03</span>
+    <nav aria-label="本单元机制">
+      <a href="#sample">普通采样</a>
+      <a href="#dspark">草稿验证</a>
+      <a href="#budget">confidence 预算</a>
+      <a href="#so">结构约束</a>
+      <a href="#repro">可复现条件</a>
+    </nav>
+    <span class="unit-ribbon__note">固定 SHA · 性能只作代价与条件</span>
+  </div>
+</div>
+
+<main id="main">
+  <section class="unit-hero" aria-labelledby="unit-title">
+    <div class="wrap">
+      <p class="eyebrow"><span class="eyebrow__rule"></span>机制深读 · 采样与验证 / SAMPLING &amp; VERIFICATION</p>
+      <div class="unit-hero__grid">
+        <div>
+          <h1 id="unit-title">模型给的是分布，<br><span>不是已经选好的答案。</span></h1>
+          <p class="unit-hero__lede">这一单元只跟三件事走：hidden states 怎样经 logits、temperature 与 top-p 变成一个被抽中的 token；草稿模型先写出的 A/B/C，怎样在目标模型处只留下连续接受前缀，并在首拒绝位置重采样；结构化输出又怎样先把 schema 编成语法，再把每一步的候选词表裁成合法集合。采样与验证都有代价，本页不把“多做草稿”写成无条件收益。</p>
+          <dl class="unit-hero__facts" aria-label="本单元阅读信息">
+            <div><dt>连续机制</dt><dd>采样 / 草稿验证 / 结构推进</dd></div>
+            <div><dt>可改条件</dt><dd>温度、验证分支、预算、trigger、截止</dd></div>
+            <div><dt>源码口径</dt><dd>固定 commit + 精确行号</dd></div>
+          </dl>
+        </div>
+        <aside class="unit-map" aria-labelledby="unit-map-title">
+          <div class="unit-map__head"><span id="unit-map-title">本单元地图</span><span>点击直达</span></div>
+          <ol>
+            <li><a href="#sample"><span class="num">01</span><span><strong>候选分布与一次采样</strong><small>同一个 u 在不同温度／mask 下落到哪</small></span><span class="unit-map__state">连续时间轴</span></a></li>
+            <li><a href="#dspark"><span class="num">02</span><span><strong>草稿、验证与首拒绝</strong><small>A/B 接受、C 拒绝，D 从哪里来</small></span><span class="unit-map__state">双分支</span></a></li>
+            <li><a href="#budget"><span class="num">03</span><span><strong>confidence 验证预算</strong><small>total_q=5 为什么分成 [3,2]</small></span><span class="unit-map__state">参数重算</span></a></li>
+            <li><a href="#so"><span class="num">04</span><span><strong>结构化输出状态机</strong><small>编译、合法 mask、推进与截断</small></span><span class="unit-map__state">条件切换</span></a></li>
+          </ol>
+          <p class="unit-map__foot">图里的字母候选、概率与时间都是教学缩小模型，不是运行时 trace；源码事实另附固定行号。</p>
+        </aside>
+      </div>
+      <div class="unit-contract">
+        <span>读完之后，你应该能回答</span>
+        <ul>
+          <li>logits 与概率分布差在哪一步，top-p 之后为什么还要重归一化</li>
+          <li>为什么只保留连续接受前缀，首拒绝的 D 为什么不是“把 C 改掉”</li>
+          <li>confidence 高是否等于一定接受，预算 5 与 [3,2] 的中间量是什么</li>
+          <li>结构化输出为什么不能只在最后修补字符串，哪些情况仍可能不完整</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <noscript>
+    <div class="wrap">
+      <p class="unit-noscript"><strong>JavaScript 已关闭。</strong>本页的机制正文、源码小窗和每张图下方的“无 JavaScript 分步回退”都可阅读；播放控制、温度切换、预算滑块与结构开关会被隐藏。交互算例的关键数值与两个分支结论已写在回退文字里。</p>
+    </div>
+  </noscript>
+
+  <section class="mech mech-first" id="sample" aria-labelledby="sample-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M08</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--sim">教学数值</span><span class="mech-time">约 8 分钟 · 一条连续时间轴</span></div>
+          <h2 id="sample-title">hidden 之后，先有候选空间，才有 token</h2>
+          <p class="mech-thesis">模型最后一层给出 hidden states；采样位置上的 hidden 被投影成每个候选的 <strong>logit</strong>。logit 不是概率，也还不是 token。temperature、top-p、top-k 等 processor 改变候选空间，softmax 才把分数变成分布，最后才从分布里抽一个值。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>决策</dt><dd>processor 链与采样参数</dd></div>
+          <div><dt>状态</dt><dd>hidden → logits → p → token</dd></div>
+          <div><dt>代价</dt><dd>候选 mask／排序／采样，非免费</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>同一组 hidden 对应整个词表的分数；最终只能提交一个 token。</dd></div>
+        <div><dt>谁决定</dt><dd><code>Sampler.forward</code> 取采样位置，调用 processor，再采样；prefill 取末位，decode 取当前步。</dd></div>
+        <div><dt>状态怎么变</dt><dd>连续 hidden 向量 → 每候选一个实数 logit → 归一化概率 → 一个离散 token。</dd></div>
+        <div><dt>代价视角</dt><dd>候选空间越大，projection、mask、top-k/top-p 与采样都要工作；处理概率不等于做了更多有效矩阵乘。</dd></div>
+      </dl>
+
+      <figure class="lab out-lab lab--sample" data-lab="sample" aria-labelledby="sx-lab-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互算例 · 5 个字母候选 / 教学 logits / 固定抽取 u=0.93</span>
+            <h3 id="sx-lab-title">一次普通采样：候选卡不变，分布连续变形</h3>
+          </div>
+          <span class="lab-count" data-count aria-label="动画进度">00%</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params out-params js-only">
+            <span class="param-label">temperature</span>
+            <div class="seg" role="group" aria-label="选择采样温度">
+              <button type="button" data-temp="0.7" aria-pressed="false">0.7</button>
+              <button type="button" data-temp="1.0" aria-pressed="true">1.0</button>
+              <button type="button" data-temp="1.3" aria-pressed="false">1.3</button>
+            </div>
+            <span class="lab-note">top-p 固定 0.90；换温度会重算分布并回到起点。改参数不会自动播放。</span>
+          </div>
+
+          <div class="sx-rail" aria-hidden="true">
+            <span class="sx-rail__line"><i data-sx-fill></i></span>
+            <span class="sx-stop" data-sx-stop="0"><b>01</b>hidden</span>
+            <span class="sx-stop" data-sx-stop="1"><b>02</b>logits</span>
+            <span class="sx-stop" data-sx-stop="2"><b>03</b>z / T</span>
+            <span class="sx-stop" data-sx-stop="3"><b>04</b>softmax</span>
+            <span class="sx-stop" data-sx-stop="4"><b>05</b>top-p</span>
+            <span class="sx-stop" data-sx-stop="5"><b>06</b>抽一个</span>
+            <span class="sx-stop" data-sx-stop="6"><b>07</b>token</span>
+          </div>
+
+          <div class="sx-work">
+            <div class="sx-hidden">
+              <p class="out-label">HIDDEN / 采样位置</p>
+              <div class="sx-hvec" aria-hidden="true">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+              <p class="sx-hidden__note" data-sx-hidden-note>prefill 取最后一个 prompt 位置；还没有候选概率。</p>
+              <span class="sx-proj" aria-hidden="true"><i data-sx-proj></i></span>
+            </div>
+
+            <div class="sx-board">
+              <div class="sx-board__head">
+                <span>候选 / 同一组 5 个对象</span>
+                <span data-sx-mode>等待 logits</span>
+              </div>
+              <div class="sx-cands" data-sx-cands>
+                <div class="sx-cand" data-sx-token="A">
+                  <span class="sx-cand__tok">A</span>
+                  <span class="sx-cand__bar"><i data-sx-bar></i></span>
+                  <span class="sx-cand__val" data-sx-val>—</span>
+                  <span class="sx-cand__tag" data-sx-tag>候选</span>
+                </div>
+                <div class="sx-cand" data-sx-token="B">
+                  <span class="sx-cand__tok">B</span>
+                  <span class="sx-cand__bar"><i data-sx-bar></i></span>
+                  <span class="sx-cand__val" data-sx-val>—</span>
+                  <span class="sx-cand__tag" data-sx-tag>候选</span>
+                </div>
+                <div class="sx-cand" data-sx-token="C">
+                  <span class="sx-cand__tok">C</span>
+                  <span class="sx-cand__bar"><i data-sx-bar></i></span>
+                  <span class="sx-cand__val" data-sx-val>—</span>
+                  <span class="sx-cand__tag" data-sx-tag>候选</span>
+                </div>
+                <div class="sx-cand" data-sx-token="D">
+                  <span class="sx-cand__tok">D</span>
+                  <span class="sx-cand__bar"><i data-sx-bar></i></span>
+                  <span class="sx-cand__val" data-sx-val>—</span>
+                  <span class="sx-cand__tag" data-sx-tag>候选</span>
+                </div>
+                <div class="sx-cand" data-sx-token="E">
+                  <span class="sx-cand__tok">E</span>
+                  <span class="sx-cand__bar"><i data-sx-bar></i></span>
+                  <span class="sx-cand__val" data-sx-val>—</span>
+                  <span class="sx-cand__tag" data-sx-tag>候选</span>
+                </div>
+              </div>
+              <p class="sx-board__foot" data-sx-board-foot>同一张候选卡贯穿后续所有步骤；字母是教学占位，不是真实词表 token。</p>
+            </div>
+
+            <div class="sx-out">
+              <div class="sx-out__head"><span>候选分布 / p</span><span data-sx-mass>质量 100%</span></div>
+              <div class="sx-cdf" data-sx-cdf aria-label="候选概率累计条">
+                <span class="sx-cdf__seg" data-sx-seg="A"><b>A</b></span>
+                <span class="sx-cdf__seg" data-sx-seg="B"><b>B</b></span>
+                <span class="sx-cdf__seg" data-sx-seg="C"><b>C</b></span>
+                <span class="sx-cdf__seg" data-sx-seg="D"><b>D</b></span>
+                <span class="sx-cdf__seg" data-sx-seg="E"><b>E</b></span>
+                <i class="sx-cdf__threshold" aria-hidden="true"></i>
+                <i class="sx-cdf__needle" data-sx-needle aria-hidden="true"></i>
+              </div>
+              <div class="sx-cdf__meta">
+                <span data-sx-keep>top-p 0.90 · 保留 —</span>
+                <span>固定 u = 0.93</span>
+              </div>
+              <div class="sx-final">
+                <span class="out-label">采样输出 / 下一 token</span>
+                <span class="sx-final__slot" data-sx-final>等待</span>
+              </div>
+              <span class="sx-pick" data-sx-pick aria-hidden="true">C</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="lab-state">
+          <span class="tag tag--sim" data-state-kind>教学时序</span>
+          <p data-live aria-live="polite" aria-atomic="true">入口：只有采样位置上的 hidden states。候选还没有 logits，也没有概率。</p>
+        </div>
+
+        <div class="out-scrub js-only">
+          <div class="out-scrub__head">
+            <label for="sx-scrub">时间轴 <span data-phase>hidden</span></label>
+            <span data-time>0.0s / 9.0s</span>
+          </div>
+          <input id="sx-scrub" type="range" min="0" max="1000" value="0" step="1" data-scrub aria-describedby="sx-scrub-note">
+          <p class="out-scrub__note" id="sx-scrub-note">拖动可停在任意中间帧；暂停后再播放从当前位置继续，不回到开头。</p>
+          <p class="out-motion" data-motion-note hidden>系统偏好减少动态效果：当前显示完整静态结果，不会自动播放。时间轴与阶段按钮仍可定位。</p>
+        </div>
+        <div class="lab-steps js-only" data-steps></div>
+        <div class="lab-controls js-only" role="group" aria-label="普通采样播放控制">
+          <button type="button" class="control" data-prev>上一步</button>
+          <button type="button" class="control control--play" data-play aria-pressed="false">播放</button>
+          <button type="button" class="control" data-next>下一步</button>
+          <button type="button" class="control control--reset" data-reset>重置</button>
+        </div>
+        <p class="lab-foot">教学时序，不是 runtime trace。候选卡与字母是教学对象；真实 tokenizer 的 token 可以跨多个字符，词表也远大于 5。<b>mask 后必须重新归一化</b>：被 top-p 排除的候选不再占概率质量，同一个 u 可能落到另一个 token。本图不展示随机源实现，也不把概率当作接受保证。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 分步回退</h4>
+          <ol>
+            <li><strong>hidden：</strong>取采样位置的 hidden states；prefill 用最后一个 prompt 位置，decode 用当前步。此时没有候选分布。</li>
+            <li><strong>logits：</strong>hidden 投影成每个候选的实数分数；本图用 A=2.40、B=1.80、C=0.70、D=−0.40、E=−1.20，仅为教学。</li>
+            <li><strong>temperature：</strong>用 z/T 缩放分数。T=1.0 时上面的 softmax 约为 55.0%、30.2%、10.0%、3.3%、1.5%；T=0.7 更尖，T=1.3 更平。</li>
+            <li><strong>top-p=0.90：</strong>按概率从高到低保留累计刚达到 90% 的最小集合。T=1.0 保留 A/B/C，累计 95.2%；重归一化后约 A=57.8%、B=31.7%、C=10.6%。</li>
+            <li><strong>抽一个：</strong>固定 u=0.93 落进 C 的区间，所以输出 C。T=0.7 时 mask 前 u 落 C、mask 后只保留 A/B，u 改落 B；T=1.3 时 mask 前落 D、mask 后落 C。这说明 mask 会改变同一 u 的结果。</li>
+            <li><strong>token：</strong>采样器交出离散 token，交给后续提交流程；它不是整段文本，也不等于最终答案。种子、batch 布局等条件另见“可复现条件”。</li>
+          </ol>
+        </div>
+      </figure>
+
+      <div class="out-source">
+        <div class="out-source__grid">
+          <article class="out-src-card">
+            <span class="out-src-card__kind">SAMPLER</span>
+            <h3>hidden → logits → processors → token</h3>
+            <p>文件说明与执行体把采样写成同一条链；prefill 取末位，decode 开启 MTP 时先验证上一轮草稿，再准备下一轮。</p>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L56-L93" target="_blank" rel="noopener noreferrer">sampler.py:56–93 <span aria-hidden="true">↗</span></a>
+          </article>
+          <article class="out-src-card">
+            <span class="out-src-card__kind">FORWARD</span>
+            <h3>采样位置与 processor 调用</h3>
+            <p><code>Sampler.forward:114</code> 是执行入口；后面的验证、接受结果与收尾分别在不同函数中完成。</p>
+            <div class="out-src-links">
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L114" target="_blank" rel="noopener noreferrer">sampler.py:114</a>
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L411" target="_blank" rel="noopener noreferrer">:411</a>
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L471" target="_blank" rel="noopener noreferrer">:471</a>
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L519" target="_blank" rel="noopener noreferrer">:519</a>
+            </div>
+          </article>
+          <article class="out-src-card">
+            <span class="out-src-card__kind">PROCESSORS</span>
+            <h3>temperature / top-p / top-k / log-softmax</h3>
+            <p><code>process_sampling:113</code> 处理采样参数，并接收 <code>seq_seeds</code> 与 <code>sample_positions</code>；本图只演示 temperature 与 top-p 的因果。</p>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler_utils.py#L113" target="_blank" rel="noopener noreferrer">sampler_utils.py:113 <span aria-hidden="true">↗</span></a>
+          </article>
+        </div>
+        <div class="source-read out-source__read">
+          <p class="source-read__label">逐层读 / 概率不是 token</p>
+          <ol class="line-notes">
+            <li><b>对象</b><span><strong>hidden 是向量，logit 是每候选分数，p 是归一化质量，token 是离散编号。</strong>四者不能画成同一个框；把 logit 直接叫“概率”会掩盖 softmax 与 mask。</span></li>
+            <li><b>位置</b><span><strong>prefill 只取最后一个 prompt 位置的输出用于下一 token。</strong>decode 的采样位置随步推进；MTP 时还要先处理上一轮草稿验证。</span></li>
+            <li><b>顺序</b><span><strong>mask / top-p 在采样前生效。</strong>排除候选后，剩余候选的概率必须重新归一化，否则“总和为 1”不再成立。</span></li>
+            <li><b>随机</b><span><strong>固定种子不是全部条件。</strong>每请求 seed 在 <code>SamplingParams</code> 中，但 batch 行布局、MTP 与设备路径也会影响结果；条件见下一节。</span></li>
+          </ol>
+          <p class="source-bridge"><b>本页不展示完整词表，也不复制 sampler 的函数体。</b>交互图用 5 个候选呈现机制；真实实现面对更大的词表、mask 与按请求 seed。数值仅是教学算例。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>采样不是“最后取最大值”那么轻：大词表上的 projection、top-k/top-p 的排序或阈值扫描、mask 的应用都要消耗工作；温度只是缩放 logits，不会减少模型主干的矩阵乘。把采样处理器做快，可能改善每步控制开销，但不能直接推导 MFU 或端到端吞吐收益。</p>
+          <p class="perf-boundary">源码因果，不是本机测量。没有采样耗时、词表大小或加速比数据。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：top-p 排除候选后，为什么不能保留原来的概率值直接采样？</summary>
+          <div class="question__body"><p>因为剩余候选的概率和已经小于 1。若不重新归一化，同一个 u 与区间边界的含义会变，采样结果不再是“在保留集合上的条件分布”。本图的 mask 后区间会伸缩，落点也可能改变。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="out-band" id="repro" aria-labelledby="repro-title">
+    <div class="wrap">
+      <div class="out-band__head">
+        <div>
+          <p class="eyebrow"><span class="eyebrow__rule"></span>条件带 / REPRODUCIBILITY</p>
+          <h2 id="repro-title">固定 seed 只是入场券，不是跨一切 batch 的承诺</h2>
+        </div>
+        <p>README 的复现路径把设备与开关写在一起。这里把它拆成条件，而不是把“同 seed”说成无条件可复现。</p>
+      </div>
+      <div class="repro-grid">
+        <article class="repro-card">
+          <span class="repro-card__tag">普通路径</span>
+          <h3>每请求 seed 与采样位置</h3>
+          <p><code>SamplingParams</code> 定义每请求种子；<code>process_sampling</code> 还接收 <code>seq_seeds</code> 与 <code>sample_positions</code>。种子是输入的一部分，不是“全局随机源”。</p>
+          <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/sampling_params.py#L44-L79" target="_blank" rel="noopener noreferrer">sampling_params.py:44–79 <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="repro-card repro-card--conditions">
+          <span class="repro-card__tag">README 条件集</span>
+          <h3>四件事一起固定</h3>
+          <ul class="repro-conditions">
+            <li>NVIDIA 路径</li>
+            <li><code>batch_invariant=1</code></li>
+            <li><code>MTP_varlen=0</code></li>
+            <li>固定 <code>seq_seed</code></li>
+          </ul>
+          <p>这是公开 README 给出的可复现要求；它不保证任意设备、任意 batch 形状、任意软件栈都逐 token 一致。</p>
+          <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/README.md" target="_blank" rel="noopener noreferrer">README.md · 固定 SHA <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="repro-card repro-card--boundary">
+          <span class="repro-card__tag">边界</span>
+          <h3>什么不能从 seed 推出来</h3>
+          <p>同样的 prompt 与 seed，在不同 batch 组合、不同 kernel、不同并行拓扑或不同版本下，不保证相同的 token 序列。batch-invariant 是减少批次布局影响的条件，不是性能收益或正确性证明。</p>
+          <p class="repro-boundary">本站不提供本机随机性测试；没有 GPU 逐 token 对照。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="dspark" aria-labelledby="dspark-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M09</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">约 9 分钟 · 卡片连续穿过草稿 / 验证 / 提交</span></div>
+          <h2 id="dspark-title">草稿先跑，目标模型只收连续前缀</h2>
+          <p class="mech-thesis">草稿模型一次猜出 A/B/C，不等于最终输出。目标模型在目标分布上验证这些位置；只保留从开头连续通过的 token。首个拒绝之后的位置全部作废，并在首拒绝位置用残差分布重新采样。若整段都通过，目标模型还要在末尾补一个正常采样 token，才能继续下一轮。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>决策</dt><dd>目标模型的接受结果</dd></div>
+          <div><dt>状态</dt><dd>草稿 → 验证 → 接受前缀 / 首拒绝</dd></div>
+          <div><dt>代价</dt><dd>草稿计算 + 目标验证 + 调度</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>decode 每步只出一个 token；草稿希望一次提出多个候选，减少目标模型的串行步数。</dd></div>
+        <div><dt>谁决定</dt><dd>目标模型验证草稿位置；<code>_verification</code>、接受结果和收尾函数共同决定保留哪些 token。</dd></div>
+        <div><dt>状态怎么变</dt><dd>草稿 A/B/C → 连续通过 A/B → C 在首拒绝处被替换为残差采样的 D → 只提交 A/B/D。</dd></div>
+        <div><dt>代价视角</dt><dd>草稿也要算，验证也要算；只有接受率与调度条件合适时才可能摊薄，不能把“有草稿”直接等同加速。</dd></div>
+      </dl>
+
+      <figure class="lab out-lab lab--dspark" data-lab="dspark" aria-labelledby="ds-lab-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互算例 · 三个草稿位置 / 目标验证 / 教学分支</span>
+            <h3 id="ds-lab-title">同一张 A/B/C 卡，从草稿区走到提交区</h3>
+          </div>
+          <span class="lab-count" data-count aria-label="动画进度">00%</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params out-params js-only">
+            <span class="param-label">本轮验证结果</span>
+            <div class="seg" role="group" aria-label="选择草稿验证分支">
+              <button type="button" data-branch="partial" aria-pressed="true">A/B 接受，C 拒绝</button>
+              <button type="button" data-branch="all" aria-pressed="false">A/B/C 全接受</button>
+            </div>
+            <span class="lab-note">切换分支会暂停、重算事件序列并回到起点。不是运行时统计。</span>
+          </div>
+
+          <div class="ds-arena" data-ds-arena>
+            <div class="ds-zone ds-zone--draft"><span>DRAFT</span><small>草稿模型提议</small></div>
+            <div class="ds-zone ds-zone--target"><span>TARGET</span><small>逐位验证</small></div>
+            <div class="ds-zone ds-zone--out"><span>OUTPUT</span><small>只提交连续前缀</small></div>
+            <div class="ds-zone ds-zone--reject"><span>REJECT</span><small>首拒绝处之后作废</small></div>
+
+            <span class="ds-beam" data-ds-beam aria-hidden="true"></span>
+            <span class="ds-residual" data-ds-residual aria-hidden="true"><b>residual</b><small>目标分布在首拒绝处重采样</small></span>
+
+            <div class="ds-card" data-ds-card="A"><b>A</b><small data-ds-status>draft</small><span class="ds-stamp" data-ds-stamp></span></div>
+            <div class="ds-card" data-ds-card="B"><b>B</b><small data-ds-status>draft</small><span class="ds-stamp" data-ds-stamp></span></div>
+            <div class="ds-card" data-ds-card="C"><b>C</b><small data-ds-status>draft</small><span class="ds-stamp" data-ds-stamp></span></div>
+            <div class="ds-card ds-card--new" data-ds-card="D"><b>D</b><small data-ds-status>新对象</small><span class="ds-stamp" data-ds-stamp></span></div>
+
+            <div class="ds-commit" data-ds-commit>R0 · 尚未提交</div>
+            <div class="ds-legend"><span><i class="ds-dot ds-dot--accept"></i>进入连续前缀</span><span><i class="ds-dot ds-dot--reject"></i>首拒绝</span><span><i class="ds-dot ds-dot--new"></i>目标重采样</span></div>
+          </div>
+        </div>
+
+        <div class="lab-state">
+          <span class="tag tag--sim" data-state-kind>教学时序</span>
+          <p data-live aria-live="polite" aria-atomic="true">起点：草稿模型还没有提出 A/B/C；它们不是最终输出，也没有被目标模型验证。</p>
+        </div>
+
+        <div class="out-scrub js-only">
+          <div class="out-scrub__head">
+            <label for="ds-scrub">时间轴 <span data-phase>草稿</span></label>
+            <span data-time>0.0s / 10.0s</span>
+          </div>
+          <input id="ds-scrub" type="range" min="0" max="1000" value="0" step="1" data-scrub aria-describedby="ds-scrub-note">
+          <p class="out-scrub__note" id="ds-scrub-note">卡片在草稿区、目标区与提交区之间连续移动；校验戳出现的位置对应接受/拒绝事件。</p>
+          <p class="out-motion" data-motion-note hidden>系统偏好减少动态效果：当前显示默认分支的最终状态，不会自动播放。可切换分支或拖动时间轴查看。</p>
+        </div>
+        <div class="lab-steps js-only" data-steps></div>
+        <div class="lab-controls js-only" role="group" aria-label="DSpark 播放控制">
+          <button type="button" class="control" data-prev>上一步</button>
+          <button type="button" class="control control--play" data-play aria-pressed="false">播放</button>
+          <button type="button" class="control" data-next>下一步</button>
+          <button type="button" class="control control--reset" data-reset>重置</button>
+        </div>
+        <p class="lab-foot">教学图用 ✓/× 表示“是否进入连续接受前缀”，<b>不是逐字符相同检查</b>。目标模型做的是基于目标分布的接受/拒绝；首拒绝位置的 D 是 residual 分布的新采样，不是把 C 改写成 D，也不是字符串替换。默认分支只提交 A/B/D；全接受分支提交 A/B/C 后再补采一个正常 token。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 分步回退</h4>
+          <ol>
+            <li><strong>草稿：</strong>草稿模型提出 A/B/C。它们只是候选草稿，不是已提交 token，也不是目标模型的输出。</li>
+            <li><strong>验证：</strong>目标模型在各自位置验证 A/B/C。A、B 连续通过；C 在第一个拒绝位置失败。通过与否不是字符串比较。</li>
+            <li><strong>接受前缀：</strong>只保留从开头连续的 A/B。C 之后的草稿位置都失去意义，不能跳过 C 继续接受后面的草稿。</li>
+            <li><strong>首拒绝重采样：</strong>目标模型在 C 的位置使用 residual 分布重新采样，得到一个新 token D；D 不是 C 的别名。提交 A/B/D。</li>
+            <li><strong>全接受分支：</strong>若 A/B/C 全部通过，目标模型在末尾补一个正常采样 token D，提交 A/B/C/D；仍然要花目标模型一次采样。</li>
+            <li><strong>下一轮：</strong>提交后的上下文继续前进；草稿计算、验证计算与调度开销都存在。没有接受率与步速数据时，不能声称固定加速。</li>
+          </ol>
+        </div>
+      </figure>
+
+      <div class="out-source">
+        <div class="out-source__grid">
+          <article class="out-src-card">
+            <span class="out-src-card__kind">VERIFY</span>
+            <h3>验证不是字符串匹配</h3>
+            <p><code>_verification:411</code>、<code>get_accept_result:471</code> 与 <code>finalize_verification:519</code> 把验证、接受结果和收尾分开。图上的 ✓/× 只表示是否进入连续前缀。</p>
+            <div class="out-src-links">
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L411" target="_blank" rel="noopener noreferrer">:411</a>
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L471" target="_blank" rel="noopener noreferrer">:471</a>
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L519" target="_blank" rel="noopener noreferrer">:519</a>
+            </div>
+          </article>
+          <article class="out-src-card">
+            <span class="out-src-card__kind">BUDGET</span>
+            <h3>验证长度不是固定常量</h3>
+            <p><code>mtp_varlen.hpp:150–266</code> 用历史 confidence 与 decode 性能曲线挑 <code>total_q</code>；没有曲线时退回全 draft。CPU 侧还要考虑 ZOS 的跨轮可见性。</p>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/mtp_varlen.hpp#L150-L266" target="_blank" rel="noopener noreferrer">mtp_varlen.hpp:150–266 <span aria-hidden="true">↗</span></a>
+          </article>
+          <article class="out-src-card">
+            <span class="out-src-card__kind">NEXT</span>
+            <h3>下一轮还要付账</h3>
+            <p>提交 A/B/D 后，下一步仍要产生新的 hidden、草稿和验证；DSpark 没有让目标模型的计算消失，只是改变了每轮 try 的长度与分布。</p>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L56-L93" target="_blank" rel="noopener noreferrer">sampler.py:56–93 <span aria-hidden="true">↗</span></a>
+          </article>
+        </div>
+        <div class="source-read out-source__read">
+          <p class="source-read__label">逐段读 / 只认连续前缀</p>
+          <ol class="line-notes">
+            <li><b>草稿</b><span><strong>草稿生成与最终输出是两个对象层。</strong>草稿 A/B/C 可能在目标模型处被拒绝；不能把它们提前写进用户输出。</span></li>
+            <li><b>首拒绝</b><span><strong>“连续”是关键。</strong>即使后面的草稿偶然也与目标分布相容，C 被拒绝后也不能跳过 C 接受后面的位置。</span></li>
+            <li><b>重采样</b><span><strong>D 来自目标模型在首拒绝位置的 residual 分布。</strong>它不是把字符串 C 替换成 D；图上保留 C 在拒绝区，D 作为新对象进入提交区。</span></li>
+            <li><b>全接受</b><span><strong>全接受不等于白拿一个 token。</strong>目标模型仍要在末尾正常采样一次，得到下一轮的起点 token。</span></li>
+          </ol>
+          <p class="source-bridge"><b>不要把 DSpark 画成“字符串比较器”。</b>接受/拒绝发生在目标分布与草稿 token 的概率关系上；本图只画结果分支，不展示真实采样公式与随机数。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>草稿验证把“每步一个 token”变成“一次目标前向验证多个位置”，但草稿模型本身、目标验证的额外 q 行、拒绝后的重采样以及调度都要计时。只有当接受长度与这些成本的关系合适时，端到端步速才可能改善；本页不把任何接受率或草稿长度换算成加速比例。</p>
+          <p class="perf-boundary">机制因果，不是实测。接受率、验证 q 行与步速之间需要 trace / 基准才能定量。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：为什么全接受时还要补一个 token，而不能直接进入下一轮草稿？</summary>
+          <div class="question__body"><p>验证接受的是“已有草稿位置”的 token；要生成下一个位置，目标模型仍需一次正常采样。补出的 token 成为下一轮上下文的最后一个已提交 token，之后的草稿才有落点。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="budget" aria-labelledby="budget-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M10</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--sim">分配算例</span><span class="mech-time">约 6 分钟 · 参数重算</span></div>
+          <h2 id="budget-title">total_q=5，为什么落到 [3,2]</h2>
+          <p class="mech-thesis">DSpark 的验证预算不是平均切给每个请求。参考实现先给每个序列留 1 个基础 query；剩下的 <code>extra_budget = total_q − num_seqs</code> 按各序列的 confidence 累积乘积做全局排序，再只把入选的额外位置加回每个序列。confidence 是分配信号，不是“必接受”标签。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>输入</dt><dd>每请求 confidence 序列、total_q</dd></div>
+          <div><dt>操作</dt><dd>前缀乘积 → 全局排名 → 计数</dd></div>
+          <div><dt>输出</dt><dd>每请求 seqlens_q / 验证长度</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>为什么不能直接取单点</dt><dd>选择第 k 个草稿位置意味着前面的位置也要一起验证；分配单位是一个前缀，而不是孤立位置。</dd></div>
+        <div><dt>为什么用前缀乘积</dt><dd>每一步 confidence 相乘，表示到该位置为止仍被保留的联合信号；它在同一请求内不递增。</dd></div>
+        <div><dt>基础 query</dt><dd>每个序列先有 1 个基础 query；额外的入选位置才增加 <code>seqlen_q</code>。</dd></div>
+        <div><dt>回退</dt><dd>没有性能曲线时退回全 draft；曲线与历史 confidence 都影响 total_q，不能当成静态最优配置。</dd></div>
+      </dl>
+
+      <figure class="lab out-lab lab--budget" data-lab="budget" aria-labelledby="bd-lab-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互算例 · 2 个请求 / 各 3 个 confidence / 默认 total_q=5</span>
+            <h3 id="bd-lab-title">预算、前缀信号与每请求长度</h3>
+          </div>
+          <span class="lab-count" data-bd-count>5 → [3,2]</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="bd-top">
+            <label class="bd-budget" for="bd-totalq">
+              <span class="param-label">total_q</span>
+              <input id="bd-totalq" type="range" min="2" max="7" step="1" value="5" data-bd-totalq>
+              <output data-bd-totalq-out for="bd-totalq">5</output>
+            </label>
+            <div class="bd-eq"><span>extra_budget</span><b data-bd-extra>3</b><small>= total_q − 2 个基础 query</small></div>
+            <p class="lab-note">默认 confidence：[0.9, 0.8, 0.5] 与 [0.6, 0.5, 0.5]。拖动任一滑块都会立即重算，不涉及时间轴。</p>
+          </div>
+
+          <div class="bd-reqs">
+            <article class="bd-req" data-bd-req="0">
+              <div class="bd-req__head"><strong>R1</strong><span>基础 1 · 额外 <b data-bd-win="0">2</b></span></div>
+              <div class="bd-sliders">
+                <label><span>c₁</span><input type="range" min="0.1" max="0.99" step="0.01" value="0.9" data-bd-conf="0-0"><output data-bd-conf-out="0-0">0.90</output></label>
+                <label><span>c₂</span><input type="range" min="0.1" max="0.99" step="0.01" value="0.8" data-bd-conf="0-1"><output data-bd-conf-out="0-1">0.80</output></label>
+                <label><span>c₃</span><input type="range" min="0.1" max="0.99" step="0.01" value="0.5" data-bd-conf="0-2"><output data-bd-conf-out="0-2">0.50</output></label>
+              </div>
+              <div class="bd-chain" data-bd-chain="0"></div>
+              <div class="bd-seq">seqlen_q <b data-bd-seqlen="0">3</b></div>
+            </article>
+            <article class="bd-req" data-bd-req="1">
+              <div class="bd-req__head"><strong>R2</strong><span>基础 1 · 额外 <b data-bd-win="1">1</b></span></div>
+              <div class="bd-sliders">
+                <label><span>c₁</span><input type="range" min="0.1" max="0.99" step="0.01" value="0.6" data-bd-conf="1-0"><output data-bd-conf-out="1-0">0.60</output></label>
+                <label><span>c₂</span><input type="range" min="0.1" max="0.99" step="0.01" value="0.5" data-bd-conf="1-1"><output data-bd-conf-out="1-1">0.50</output></label>
+                <label><span>c₃</span><input type="range" min="0.1" max="0.99" step="0.01" value="0.5" data-bd-conf="1-2"><output data-bd-conf-out="1-2">0.50</output></label>
+              </div>
+              <div class="bd-chain" data-bd-chain="1"></div>
+              <div class="bd-seq">seqlen_q <b data-bd-seqlen="1">2</b></div>
+            </article>
+          </div>
+
+          <div class="bd-rank-wrap">
+            <div class="bd-rank-head"><span>全局排名 / 前缀信号从高到低</span><span data-bd-selected-label>前 3 名入选额外预算</span></div>
+            <div class="bd-ranks" data-bd-ranks></div>
+          </div>
+
+          <div class="bd-result" aria-live="polite">
+            <div><span>R1</span><strong data-bd-result="0">3</strong><small>1 基础 + 2 额外</small></div>
+            <div><span>R2</span><strong data-bd-result="1">2</strong><small>1 基础 + 1 额外</small></div>
+            <div class="bd-result__why"><span>因果</span><p data-bd-why>前 3 个前缀信号是 R1·p1=.900、R1·p2=.720、R2·p1=.600；R1 得 2 个额外、R2 得 1 个，因此 [3,2]。</p></div>
+          </div>
+          <div class="bd-actions">
+            <button type="button" class="control control--reset" data-bd-reset>恢复默认 [3,2]</button>
+          </div>
+        </div>
+
+        <div class="lab-state">
+          <span class="tag tag--infer" data-state-kind>教学分配</span>
+          <p data-bd-live aria-live="polite" aria-atomic="true">total_q=5，2 个基础 query，额外预算 3；默认分配 [3,2]。</p>
+        </div>
+        <p class="lab-foot">这是分配算例，不是接受率预测，也不是吞吐提升。confidence 高只代表该前缀在预算排序中更靠前；真实接受仍由目标模型的验证决定。本图不启用 ZOS 修正与曲线回退，只展示参考实现的计数逻辑：<code>wins = (ranks &lt; extra_budget).sum()</code>、<code>seqlens_q = 1 + wins</code>。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 回退 / 默认分配</h4>
+          <p>R1 confidence [0.9,0.8,0.5] → 前缀乘积 [0.900,0.720,0.360]；R2 [0.6,0.5,0.5] → [0.600,0.300,0.150]。total_q=5、两个基础 query，extra_budget=3。全局前 3 名是 .900、.720、.600，分别属于 R1、R1、R2；所以 R1 得 2 个额外，R2 得 1 个，seqlens_q=[3,2]。</p>
+          <p>如果 total_q=2，则没有额外位置，两个请求都是 [1,1]。提高某个 confidence 可能改变排名与长度；不等同于接受。</p>
+        </div>
+      </figure>
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="schedule_mtp_varlen.py 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/model_executor/layers/tilelang_ops/schedule_mtp_varlen.py</span></div>
+              <span class="src-function">参考分配实现</span>
+            </div>
+            <div class="source-window__meta"><span>L91–98</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/tilelang_ops/schedule_mtp_varlen.py#L91-L98" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>    # Reshape ranks back to [num_seqs, nextn]
+    ranks = ranks.reshape(num_seqs, nextn)
+
+    # Count how many positions per sequence have rank &lt; extra_budget (i.e., made it into top-k)
+    wins = (ranks &lt; extra_budget).to(torch.int32).sum(dim=1)  # [num_seqs]
+
+    # Each sequence gets 1 base token + number of extra positions won
+    seqlens_q.copy_(1 + wins)</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 先有前缀，后有 rank</p>
+          <ol class="line-notes">
+            <li><b>前缀</b><span><strong>每请求的 confidence 先做累积乘积。</strong>同一请求内它不递增；因此某个位置入选时，前面的位置不会更差，分配天然保持前缀形状。</span></li>
+            <li><b>全局</b><span><strong>所有请求的前缀放在一起排序。</strong>这里用的是全局 flat index；同分按 flat index 稳定处理，不按请求平均切。</span></li>
+            <li><b>基础 query</b><span><strong>每条序列最后都加 1。</strong>所以 total_q=5 不会直接变成“5 个请求各 5 行”；它先扣掉两个基础 query，再分配 3 个额外位置。</span></li>
+            <li><b>输入条件</b><span><strong>total_q 由 confidence 与 decode 性能曲线共同选择。</strong>没有曲线时退回全 draft；CPU 新一轮可能看不到 ZOS 最新结果，不能把静态分配当成完整调度。</span></li>
+          </ol>
+          <p class="source-bridge"><b>高 confidence 不是“必接受”。</b>它只决定验证预算的优先顺序。真正的接受/拒绝仍由目标模型验证；本站没有接受率与步速实测，不把 [3,2] 换算成吞吐。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="so" aria-labelledby="so-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M11</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--deploy">生产描述边界</span><span class="mech-time">约 9 分钟 · 编译 → mask → 推进</span></div>
+          <h2 id="so-title">结构化输出：先把合法空间编译出来</h2>
+          <p class="mech-thesis">概率采样可能生成不合法 JSON 或语法。事后修补不能保证解码每一步都合法；结构化输出把 schema 编译成语法，维护自动机状态，在采样前把当前状态不允许的候选 mask 掉，再采样并推进状态。约束的是<strong>语法续写</strong>，不是内容真实。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>决策</dt><dd>grammar + 当前 automaton 状态</dd></div>
+          <div><dt>状态</dt><dd>schema → 编译 → mask → token → 新状态</dd></div>
+          <div><dt>代价</dt><dd>编译 / mask / 状态推进，不是免费</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>高概率 token 不一定让 JSON 保持合法；只靠最后修补会破坏已经生成的文本。</dd></div>
+        <div><dt>谁决定</dt><dd>compiler 把 schema 编成 grammar；matcher 保存状态、trigger 与回退；sampler 每步构造 bitmask。</dd></div>
+        <div><dt>状态怎么变</dt><dd>合法候选集合由当前自动机状态决定；采样一个 token 后，matcher 推进或回退到下一状态。</dd></div>
+        <div><dt>边界</dt><dd>长度截止、取消或提前停止仍可能留下不完整结构；trigger 之前可能不受约束；内容正确性不在保证内。</dd></div>
+      </dl>
+
+      <figure class="lab out-lab lab--so" data-lab="so" aria-labelledby="so-lab-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互算例 · 教学字符级 JSON / schema 只要求一个 boolean 字段</span>
+            <h3 id="so-lab-title">编译一次，逐步裁候选，再推进状态</h3>
+          </div>
+          <span class="lab-count" data-count aria-label="动画进度">00%</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params out-params js-only">
+            <label class="check-row"><input type="checkbox" data-so-trigger checked> grammar trigger 已触发</label>
+            <label class="check-row"><input type="checkbox" data-so-cutoff> 本轮长度截止</label>
+            <span class="lab-note">两个开关都会暂停、重算并回到起点；默认得到完整 <code>{ "ok": true }</code>。</span>
+          </div>
+
+          <div class="so-compile" data-so-compile>
+            <div class="so-schema">
+              <span class="out-label">SCHEMA / 输入</span>
+              <code>{ "ok": boolean }</code>
+              <small>strict JSON；只允许一个字段</small>
+            </div>
+            <span class="so-arrow" aria-hidden="true">→</span>
+            <div class="so-compiler">
+              <span class="out-label">COMPILER</span>
+              <strong>本地线程池</strong>
+              <small>submit / pump；拒绝 serialized grammar</small>
+              <i class="so-compilebar"><b data-so-compile-fill></b></i>
+            </div>
+            <span class="so-arrow" aria-hidden="true">→</span>
+            <div class="so-grammar">
+              <span class="out-label">GRAMMAR</span>
+              <strong data-so-grammar>等待编译</strong>
+              <small>语法合法 ≠ 内容为真</small>
+            </div>
+          </div>
+
+          <div class="so-work" data-so-work>
+            <div class="so-cands" data-so-cands>
+              <div class="so-cand" data-so-token="true">
+                <b>true</b>
+                <span class="so-cand__p" data-so-p>0.50</span>
+                <i class="so-cand__bar"><b data-so-bar></b></i>
+                <em data-so-mask>—</em>
+              </div>
+              <div class="so-cand" data-so-token="hello">
+                <b>hello</b>
+                <span class="so-cand__p" data-so-p>0.30</span>
+                <i class="so-cand__bar"><b data-so-bar></b></i>
+                <em data-so-mask>—</em>
+              </div>
+              <div class="so-cand" data-so-token="false">
+                <b>false</b>
+                <span class="so-cand__p" data-so-p>0.15</span>
+                <i class="so-cand__bar"><b data-so-bar></b></i>
+                <em data-so-mask>—</em>
+              </div>
+              <div class="so-cand" data-so-token="null">
+                <b>null</b>
+                <span class="so-cand__p" data-so-p>0.05</span>
+                <i class="so-cand__bar"><b data-so-bar></b></i>
+                <em data-so-mask>—</em>
+              </div>
+            </div>
+
+            <div class="so-gate">
+              <span>SO MASK / 当前状态允许什么</span>
+              <small data-so-gate>等待编译</small>
+              <i class="so-scan" data-so-scan aria-hidden="true"></i>
+            </div>
+
+            <div class="so-cdf" data-so-cdf aria-label="结构化采样候选概率条">
+              <span class="so-cdf__seg" data-so-seg="true"><b>true</b></span>
+              <span class="so-cdf__seg" data-so-seg="hello"><b>hello</b></span>
+              <span class="so-cdf__seg" data-so-seg="false"><b>false</b></span>
+              <span class="so-cdf__seg" data-so-seg="null"><b>null</b></span>
+              <i class="so-cdf__needle" data-so-needle aria-hidden="true"></i>
+            </div>
+            <div class="so-cdf__meta"><span data-so-keep>保留质量 —</span><span>固定 u = 0.70</span></div>
+
+            <div class="so-result">
+              <div class="so-automaton">
+                <span class="out-label">AUTOMATON / 状态</span>
+                <strong data-so-state>WAIT / 未编译</strong>
+                <small data-so-state-note>trigger 与关闭位置决定下一步</small>
+              </div>
+              <div class="so-out">
+                <span class="out-label">OUTPUT / 已生成</span>
+                <code class="so-line"><span>{ "ok": </span><b data-so-slot>?</b><span data-so-close hidden> }</span></code>
+                <small data-so-out-note>尚未采样</small>
+              </div>
+            </div>
+            <span class="so-picked" data-so-picked hidden>true</span>
+          </div>
+        </div>
+
+        <div class="lab-state">
+          <span class="tag tag--sim" data-state-kind>教学时序</span>
+          <p data-live aria-live="polite" aria-atomic="true">起点：schema 还没有编译。候选词表与合法集合尚未建立；trigger 也还没有生效。</p>
+        </div>
+
+        <div class="out-scrub js-only">
+          <div class="out-scrub__head">
+            <label for="so-scrub">时间轴 <span data-phase>编译</span></label>
+            <span data-time>0.0s / 10.0s</span>
+          </div>
+          <input id="so-scrub" type="range" min="0" max="1000" value="0" step="1" data-scrub aria-describedby="so-scrub-note">
+          <p class="out-scrub__note" id="so-scrub-note">扫描条经过候选卡时应用 mask；采样 token 会沿同一路径进入输出。暂停可停在扫描中途。</p>
+          <p class="out-motion" data-motion-note hidden>系统偏好减少动态效果：当前显示默认条件（trigger 开、未截止）的完整结果，不会自动播放。可用时间轴或开关查看条件。</p>
+        </div>
+        <div class="lab-steps js-only" data-steps></div>
+        <div class="lab-controls js-only" role="group" aria-label="结构化输出播放控制">
+          <button type="button" class="control" data-prev>上一步</button>
+          <button type="button" class="control control--play" data-play aria-pressed="false">播放</button>
+          <button type="button" class="control" data-next>下一步</button>
+          <button type="button" class="control control--reset" data-reset>重置</button>
+        </div>
+        <p class="lab-foot">这是字符级教学简化：真实 tokenizer 的一个 token 可能跨多个字符，mask 粒度随 tokenizer 与 grammar 实现变化。trigger 之前可以不约束；正常完成时满足语法，但长度截止或取消仍可能得到不完整 JSON。<b>语法合法不代表字段内容真实或业务正确。</b></p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 分步回退</h4>
+          <ol>
+            <li><strong>编译：</strong>schema <code>{ "ok": boolean }</code> 交给结构化输出编译器；公开 offline 路径使用本地线程池，拒绝 serialized grammar。生产 Q&amp;A 里的专用 SO 机器是部署描述，不是这里已复现的路径。</li>
+            <li><strong>trigger：</strong>默认已触发，进入冒号后的值位置。若 trigger 尚未生效，本图的教学分支不应用 mask，候选 <code>hello</code> 也可能被抽中，无法保证合法 JSON。</li>
+            <li><strong>合法 mask：</strong>当前状态只允许 <code>true</code>/<code>false</code>（以及后续的 <code>}</code>）。<code>hello</code> 与 <code>null</code> 被置 0；剩下候选重新归一化。本图固定 u=0.70，mask 前落 <code>hello</code>，mask 后落 <code>true</code>。</li>
+            <li><strong>推进：</strong>采样 <code>true</code> 后，自动机进入期待右花括号的状态；下一步只允许 <code>}</code>，采样后输出 <code>{ "ok": true }</code>。</li>
+            <li><strong>截止分支：</strong>若长度截止在值之后、右花括号之前发生，输出停在 <code>{ "ok": true</code>，语法不完整。正常完成不等于内容正确；取消同样可能留下半截结构。</li>
+            <li><strong>代价：</strong>编译、每步 mask 与状态推进都有工作与内存成本；不要把结构化输出列为无条件提高 MFU 的开关。</li>
+          </ol>
+        </div>
+      </figure>
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="compiler.py 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/structure_output/compiler.py</span></div>
+              <span class="src-function">dispatch_and_compile()</span>
+            </div>
+            <div class="source-window__meta"><span>L54–63</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/structure_output/compiler.py#L54-L63" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>    def dispatch_and_compile(self, schema_type: str, schema: str) -&gt; CompiledGrammar:
+        try:
+            if schema_type == "json":
+                ctx = self.inner_compiler.compile_json_schema(schema, strict_mode=True)
+            elif schema_type == "regex":
+                ctx = self.inner_compiler.compile_regex(schema)
+            elif schema_type == "ebnf":
+                ctx = self.inner_compiler.compile_grammar(schema)
+            else:
+                raise ValueError("Unsupported Grammar Type")</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 约束在采样前</p>
+          <ol class="line-notes">
+            <li><b>编译</b><span><strong>三种入口：strict JSON、regex、EBNF。</strong>编译产物是 grammar/自动机，不是对已经生成字符串的修补。</span></li>
+            <li><b>执行位置</b><span><strong>公开 offline 的 matcher builder 用本地线程池。</strong><code>submit:97</code>、<code>pump:109–120</code> 编好后才交回引擎；生产 Q&amp;A 的专门 SO 机器是另一层部署描述。</span></li>
+            <li><b>每步</b><span><strong>matcher 保存状态、trigger 与回退。</strong><code>sampler.py:302</code> 构造每步 bitmask；188/437 在采样前应用；MTP 有多步 mask、试探推进与 rollback。</span></li>
+            <li><b>边界</b><span><strong>长度截止或取消可能留下不完整结构。</strong><code>matcher.py:121–153</code>、<code>scheduler.hpp:1035–1051</code> 是这条边界的源码入口。</span></li>
+          </ol>
+          <div class="out-src-links out-src-links--stack">
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/structure_output/so_matcher_builder.py#L58-L120" target="_blank" rel="noopener noreferrer">so_matcher_builder.py:58–120</a>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/structure_output/matcher.py#L58" target="_blank" rel="noopener noreferrer">matcher.py:58</a>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/sampler.py#L302" target="_blank" rel="noopener noreferrer">sampler.py:302</a>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L1035-L1051" target="_blank" rel="noopener noreferrer">scheduler.hpp:1035–1051</a>
+          </div>
+          <p class="source-bridge"><b>mask 只约束“下一步可以是什么”。</b>它不会自动让 <code>boolean</code> 的业务含义正确，也不会让被截断的输出变成完整文档。约束激活前，模型仍可能生成不受语法保护的 token。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>结构化输出在每步采样前增加 grammar 状态查询与 mask 构造，编译可能发生在请求进入调度前；这些工作改善的是格式约束，不是模型主干的矩阵乘。它可能减少无效重试或后处理，但也会带来编译延迟、mask 张量操作和状态维护，不能直接算成 MFU 收益。</p>
+          <p class="perf-boundary">机制因果，不是实测。没有编译耗时、mask 开销或线上格式错误率数据。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：为什么“最后用 JSON parser 修一下”不能替代逐步 mask？</summary>
+          <div class="question__body"><p>修补发生在 token 已经生成之后，错误结构可能已经改变了后续上下文，且无法保证每次都能补成合法答案。逐步 mask 在采样前就排除不合法续写，让每个解码步骤都有语法定义；但它仍不保证字段内容真实。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <nav class="unit-turn" aria-label="单元导航">
+    <div class="wrap unit-turn__in">
+      <a href="model.html">
+        <small>上一单元</small>
+        <span><strong>模型与注意力</strong><span class="micro-note" style="display:block">40 层主干、共享 KV 与 MoE 并行</span></span>
+      </a>
+      <div class="unit-turn__mid"><span>04 / 05</span><i aria-hidden="true"></i><span>采样与结构</span></div>
+      <a class="unit-turn__next" href="performance.html">
+        <small>NEXT / 05</small>
+        <span><strong>测量与效率</strong><span class="micro-note" style="display:block">MFU 公式、分子口径与验证边界</span></span>
+      </a>
+    </div>
+  </nav>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap site-footer__in">
+    <div>
+      <a class="brand brand--footer" href="index.html">
+        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/><path class="brand__cut" d="M5 19h30M18 8v24"/></svg>
+        <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+      </a>
+      <p>中文、面向初学者、可回到固定源码行号的 DeepInfer 教学站。</p>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+      <a href="index.html#glossary">术语</a>
+      <a href="index.html#resources">资料下载</a>
+      <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 ↗</a>
+    </div>
+    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-26 · 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
+  </div>
+</footer>
+</body>
+</html>

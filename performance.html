@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="zh-CN" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MFU、观测与验证：把性能账算清 | DeepInfer 剖面</title>
+  <meta name="description" content="DeepInfer 性能口径导读：stats_logger 的精确 MFU 公式为什么除以 model_parallel_size=CP，FP8-equivalent 分子为何排除 draft/pad/replicas，GPU busy、吞吐与 MFU 如何分开，官方 benchmark、sweep、接受率换算和生产/本地边界。">
+  <meta name="color-scheme" content="light">
+  <meta property="og:title" content="MFU、观测与验证 | DeepInfer 剖面">
+  <meta property="og:description" content="先把账算清，再谈快了多少。只展示公式、教学假设和验证边界，不造实测数值。">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/navigation.css">
+  <link rel="stylesheet" href="assets/output.css">
+  <script>document.documentElement.classList.remove('no-js');document.documentElement.classList.add('js');</script>
+  <script src="assets/output.js" defer></script>
+</head>
+<body class="unit-page performance-page">
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="version-bar">
+  <div class="wrap version-bar__in">
+    <span>固定源码 <code>5537415</code></span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>分析日期 2026-10-26</span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>静态源码阅读，无 GPU 实测</span>
+    <a href="index.html#boundary">证据边界</a>
+  </div>
+</div>
+
+<header class="site-header">
+  <div class="wrap site-header__in">
+    <a class="brand" href="index.html" aria-label="DeepInfer 剖面首页">
+      <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
+        <path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/>
+        <path class="brand__cut" d="M5 19h30M18 8v24"/>
+      </svg>
+      <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+    </a>
+    <nav class="primary-nav" aria-label="全站导航">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html" aria-current="page">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+    </nav>
+    <span class="header-status"><i aria-hidden="true"></i>章节 05</span>
+  </div>
+</header>
+
+<div class="unit-ribbon">
+  <div class="wrap unit-ribbon__in">
+    <span class="unit-ribbon__label">MEASURE / 04</span>
+    <nav aria-label="本页内容">
+      <a href="#formula">精确公式</a>
+      <a href="#meters">三块仪表</a>
+      <a href="#scope">分子口径</a>
+      <a href="#evidence">验证路线</a>
+      <a href="#boundary">不能声称什么</a>
+    </nav>
+    <span class="unit-ribbon__note">固定 SHA · 只讲口径，不造实测</span>
+  </div>
+</div>
+
+<main id="main">
+  <section class="unit-hero" aria-labelledby="unit-title">
+    <div class="wrap">
+      <p class="eyebrow"><span class="eyebrow__rule"></span>测量维度 · 性能与观测 / MEASUREMENT &amp; SCOPE</p>
+      <div class="unit-hero__grid">
+        <div>
+          <h1 id="unit-title">先把账算清，<br><span>再谈快了多少。</span></h1>
+          <p class="unit-hero__lede">这一页不新增机制，只把 DeepInfer 的性能口径拆开：统计日志的 MFU 分子是什么、首样本为什么只作起点、分母为什么除以 <code>model_parallel_size</code>（此仓等于 CP），以及 GPU busy、MFU、吞吐/延迟为什么是三块不同的仪表。所有交互数字都是明确标注的教学假设，不是本站 GPU 实测。</p>
+          <dl class="unit-hero__facts" aria-label="本页阅读信息">
+            <div><dt>精确公式</dt><dd>窗口工作量 / 时间 / MP / 峰值</dd></div>
+            <div><dt>分子口径</dt><dd>FP8 等价主模型估算</dd></div>
+            <div><dt>交互算例</dt><dd>只改时间、工作量、CP</dd></div>
+          </dl>
+        </div>
+        <aside class="unit-map" aria-labelledby="unit-map-title">
+          <div class="unit-map__head"><span id="unit-map-title">本页地图</span><span>点击直达</span></div>
+          <ol>
+            <li><a href="#formula"><span class="num">01</span><span><strong>MFU 的精确公式</strong><small>首样本、首尾窗口与 MP=CP</small></span><span class="unit-map__state">可调算例</span></a></li>
+            <li><a href="#meters"><span class="num">02</span><span><strong>三块仪表分开</strong><small>设备忙、MFU、用户吞吐不是同义词</small></span><span class="unit-map__state">口径对照</span></a></li>
+            <li><a href="#scope"><span class="num">03</span><span><strong>分子记什么</strong><small>FP8 等价系数与排除项</small></span><span class="unit-map__state">账本</span></a></li>
+            <li><a href="#evidence"><span class="num">04</span><span><strong>验证路线与边界</strong><small>benchmark / sweep / 生产 / 本地</small></span><span class="unit-map__state">能测什么</span></a></li>
+          </ol>
+          <p class="unit-map__foot">MFU 是整站机制的一维补充，不是全站主题；没有 trace、设备或权重，就不把公式算出的教学数当成 DeepInfer 实测。</p>
+        </aside>
+      </div>
+      <div class="unit-contract">
+        <span>读完之后，你应该能回答</span>
+        <ul>
+          <li>为什么首条样本的 F 不计入分子，但它的时间戳要作为窗口起点</li>
+          <li>为什么不能把日志 MFU 再按全局 EP 或 world_size 除一次卡数</li>
+          <li>分子为什么不包含 draft、padding、replicas，也不等同于“用户收到的 token”</li>
+          <li>官方 benchmark、sweep、接受率换算与本地未实测各自能证明到哪一步</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <noscript>
+    <div class="wrap">
+      <p class="unit-noscript"><strong>JavaScript 已关闭。</strong>正文、公式、源码小窗和每个算例下方的无脚本回退都可阅读；滑块、CP 切换和接受率换算会隐藏。默认教学算例的代入值与结果已写在回退文字里。</p>
+    </div>
+  </noscript>
+
+  <section class="mech mech-first" id="formula" aria-labelledby="formula-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M12</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--sim">假设算例</span><span class="mech-time">约 8 分钟 · 公式 + 可调窗口</span></div>
+          <h2 id="formula-title">MFU 的分母不是 world_size，分子也不是“所有 token”</h2>
+          <p class="mech-thesis">DeepInfer 日志的 MFU 是：首尾样本之间、引擎排班的主模型 FP8 等价工作量，除以这段时间、<code>model_parallel_size</code> 与本机口径峰值。首条样本只定起点，不计工作量；时间不延伸到 <code>now</code>。这两个窗口细节决定了它不能和吞吐曲线混着读。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>分子</dt><dd>窗口内主模型估算 TFLOPs</dd></div>
+          <div><dt>分母</dt><dd>首尾时间 × MP × 峰值</dd></div>
+          <div><dt>MP</dt><dd>此仓 = CP，不是 EP / world</dd></div>
+        </dl>
+      </header>
+
+      <div class="pf-formula-card" role="group" aria-label="MFU 精确定义">
+        <div class="pf-formula-card__head">
+          <span class="tag tag--source">源码定义</span>
+          <span>stats_logger.py:203–209</span>
+        </div>
+        <div class="pf-eq" aria-label="MFU 等于首样本之后的工作量求和，除以首尾样本时间差、model_parallel_size 和 tflops_limit">
+          <span class="pf-eq__lhs">MFU</span>
+          <span class="pf-eq__op">=</span>
+          <span class="pf-frac">
+            <span class="pf-frac__num">Σ<sub>i=1..n</sub> F<sub>i</sub> ÷ (t<sub>n</sub> − t<sub>0</sub>)</span>
+            <span class="pf-frac__den">model_parallel_size × tflops_limit</span>
+          </span>
+        </div>
+        <p class="pf-eq__text"><b>F<sub>i</sub></b> 是每步的 FP8 等价主模型估算 TFLOPs；<b>t<sub>0</sub></b> 是首条样本的时间戳，<b>F<sub>0</sub></b> 不计入求和；<b>t<sub>n</sub></b> 是最后一条样本，不用当前时刻补尾。</p>
+        <div class="pf-formula-card__foot">
+          <span><code>model_parallel_size = context_parallel_size</code></span>
+          <span><code>tflops_limit = get_bf16_tflops_limit() × 2</code></span>
+        </div>
+      </div>
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="stats_logger.py 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/engine/stats_logger.py</span></div>
+              <span class="src-function">StatsLogger._mfu()</span>
+            </div>
+            <div class="source-window__meta"><span>L203–209</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/stats_logger.py#L203-L209" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>    def _mfu(self, now: float) -&gt; float:
+        entries = self._tflops.entries
+        if len(entries) &lt;= 1:
+            return 0.0
+        # 口径：首条仅作区间起点（值不计入），分母为首尾样本间隔、不延伸到 now（对比 _throughput；_tflops 每步都追加，实际末样本时间戳即 now）
+        tflops_per_s = (sum(v for _, v, _ in entries) - entries[0][1]) / (entries[-1][0] - entries[0][0])
+        return tflops_per_s / self._parallel_config.model_parallel_size / self._tflops_limit</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+          <article class="source-window" aria-label="config.py 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/config.py</span></div>
+              <span class="src-function">并行大小</span>
+            </div>
+            <div class="source-window__meta"><span>L171–173</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/config.py#L171-L173" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>        self.model_parallel_size = self.context_parallel_size
+        self.engram_parallel_size = engram_parallel_size or (self.model_parallel_size * data_parallel_size)
+        self.world_size = max(self.model_parallel_size * data_parallel_size, self.engram_parallel_size)</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 窗口与卡数</p>
+          <ol class="line-notes">
+            <li><b>L205–209</b><span><strong>首条样本只作起点。</strong>求和工作量时减去 <code>entries[0][1]</code>；如果只有一条样本，函数直接返回 0，不能凭一条记录算 MFU。</span></li>
+            <li><b>窗口</b><span><strong>分母是最后样本减首样本。</strong>它与 <code>_throughput</code> 的“延伸到 now”不同；前者是 MFU 窗口，后者是吞吐窗口，不能拿同一条曲线读。</span></li>
+            <li><b>卡数</b><span><strong><code>model_parallel_size</code> 在这份 config 里等于 CP。</strong>把日志分母再按 EP 或全局 world_size 除一次，会重复或错配卡数。</span></li>
+            <li><b>峰值</b><span><strong><code>tflops_limit</code> 是 bf16 参考峰值 × 2。</strong>它是 FP8 等价记账口径，不是本机实测峰值；硬件表由仓内参考值提供。</span></li>
+          </ol>
+          <div class="out-src-links out-src-links--stack">
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/stats_logger.py#L195-L201" target="_blank" rel="noopener noreferrer">stats_logger.py:195–201 · throughput 窗口</a>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/llm_engine.py#L304" target="_blank" rel="noopener noreferrer">llm_engine.py:304 · tflops_limit</a>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deep_cluster/hardware/device.py#L151-L156" target="_blank" rel="noopener noreferrer">device.py:151–156 · 参考值不是实测</a>
+          </div>
+          <p class="source-bridge"><b>不要把首样本的 F 加回来。</b>它是窗口起点的“零刻度”附近的记录；分子从一开始就排除了它。否则默认例子会从 200 变成 210 TFLOPs，MFU 也跟着错。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <figure class="lab out-lab lab--mfu" data-lab="mfu" aria-labelledby="mfu-lab-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互教学算例 · 假设峰值 100 TFLOP/s / 单位与时间均为假设</span>
+            <h3 id="mfu-lab-title">只改时间、工作量、CP：先把公式代入</h3>
+          </div>
+          <span class="lab-count" data-pf-count>25.00%</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="pf-window">
+            <div class="pf-window__head">
+              <span>样本窗口 / 默认形状 10 · 80 · 120</span>
+              <span data-pf-window-note>首样本不计 F；分母 t₂ − t₀</span>
+            </div>
+            <div class="pf-window__plot" data-pf-plot>
+              <span class="pf-window__axis"><i></i></span>
+              <span class="pf-sample" data-pf-sample="0" style="left:0%">
+                <b data-pf-f0>F₀=10</b>
+                <small>t₀ · 起点</small>
+              </span>
+              <span class="pf-sample" data-pf-sample="1" style="left:50%">
+                <b data-pf-f1>F₁=80</b>
+                <small>t₁</small>
+              </span>
+              <span class="pf-sample" data-pf-sample="2" style="left:100%">
+                <b data-pf-f2>F₂=120</b>
+                <small>t₂ · 末样本</small>
+              </span>
+              <span class="pf-bracket" data-pf-bracket><i></i><b data-pf-dt-label>Δt = 2.00 s</b></span>
+            </div>
+            <p class="pf-window__foot">样本值随“窗口计入工作量 ΣF”按默认 10/80/120 的形状等比缩放；时间位置随 Δt 压缩。真实 trace 的形状由执行决定，本图只解释首尾窗口。</p>
+          </div>
+
+          <div class="pf-controls">
+            <label class="pf-control" for="pf-work">
+              <span><b>ΣF / 窗口计入工作量</b><small>FP8 等价主模型估算，TFLOPs</small></span>
+              <input id="pf-work" type="range" min="80" max="320" step="10" value="200" data-pf-work>
+              <output for="pf-work" data-pf-work-out>200</output>
+            </label>
+            <label class="pf-control" for="pf-time">
+              <span><b>Δt / 首尾时间差</b><small>秒；不是首 token 延迟</small></span>
+              <input id="pf-time" type="range" min="1.0" max="2.6" step="0.05" value="2.0" data-pf-time>
+              <output for="pf-time" data-pf-time-out>2.00</output>
+            </label>
+            <div class="pf-control pf-control--cp">
+              <span><b>model_parallel_size = CP</b><small>不是 EP / world_size</small></span>
+              <div class="seg" role="group" aria-label="选择模型并行大小 CP">
+                <button type="button" data-pf-cp="1" aria-pressed="false">1</button>
+                <button type="button" data-pf-cp="2" aria-pressed="false">2</button>
+                <button type="button" data-pf-cp="4" aria-pressed="true">4</button>
+                <button type="button" data-pf-cp="8" aria-pressed="false">8</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="pf-readout">
+            <div class="pf-readout__big">
+              <span>假设算例 MFU</span>
+              <strong data-pf-mfu>25.00%</strong>
+              <small>不是 DeepInfer 实测</small>
+            </div>
+            <div class="pf-readout__math">
+              <p><span>代入</span><code data-pf-sub>200 ÷ 2.00 ÷ 4 ÷ 100</code></p>
+              <dl>
+                <div><dt>ΣF</dt><dd data-pf-num>200 TFLOPs</dd></div>
+                <div><dt>Δt</dt><dd data-pf-den>2.00 s</dd></div>
+                <div><dt>MP = CP</dt><dd data-pf-mp>4</dd></div>
+                <div><dt>峰值假设</dt><dd>100 TFLOP/s</dd></div>
+              </dl>
+            </div>
+            <div class="pf-readout__note">
+              <p><b>假设：</b>每设备 FP8 等价峰值固定 100 TFLOP/s；ΣF 是本引擎排班主模型工作量；窗口内首样本不计入，只作起点。</p>
+              <p><b>变化条件：</b>只改工作量、时间与 CP。把时间从 2.00 s 改到 1.60 s，默认工作量不变时 MFU 为 31.25%；这不是 DeepInfer 实测提升。减少主模型工作量时必须同时改分子，不能固定分子伪造收益。</p>
+            </div>
+          </div>
+
+          <div class="pf-actions">
+            <span class="tag tag--sim">纯教学算例</span>
+            <button type="button" class="control control--reset" data-pf-reset>恢复默认 25.00%</button>
+          </div>
+          <p class="pf-live" data-pf-live aria-live="polite">默认：200 TFLOPs / 2.00 s / CP=4 / 100 TFLOP/s = 25.00%。</p>
+        </div>
+        <p class="lab-foot">本算例把“100 TFLOP/s”固定成假设峰值，只允许改工作量、时间与 CP。真实 MFU 还要对齐设备/峰值口径、精度、EP/DP/CP、输入输出长度与 cache 命中率；分子是排班估算，不是最终接受 token 的实测 FLOPs，也不是用户吞吐。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 回退 / 默认算例</h4>
+          <p>源码窗口三个样本为 (t=0,F=10)、(t=1,F=80)、(t=2,F=120)。首样本 F=10 只作起点，窗口计入 80+120=200 TFLOPs；时间差 2−0=2 s；此仓 MP=CP=4；假设峰值 100 TFLOP/s。MFU = 200÷2÷4÷100 = 0.25 = <b>25%</b>。</p>
+          <p>若保持工作量与峰值，时间从 2 s 变为 1.6 s，MFU = 200÷1.6÷4÷100 = <b>31.25%</b>。若减少主模型工作量，必须同时降低 ΣF；这是公式教学，不是实测提升，也不证明任何机制带来了该时间变化。</p>
+        </div>
+      </figure>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">这个公式不能回答什么</span>
+          <p>它不能说明用户首 token 等了多久、相邻 token 多快，也不能说明设备是否被有用工作填满。它只回答：在一个首尾样本窗口里，按约定主模型等价 FLOPs、CP 与峰值口径，设备理论峰值被“记账工作量”用了多少。</p>
+          <p class="perf-boundary">无 GPU 实测；不展示虚构 MFU、吞吐或加速比。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：为什么首条样本的时间戳要保留，但它的工作量不要？</summary>
+          <div class="question__body"><p>分子是“从首样本之后到末样本”的增量工作量，需要首样本作窗口左端点；但 <code>entries[0][1]</code> 是起点记录，参考实现把它排除，避免把窗口外的第一步重复计入。两条规则一起定义了口径。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="meters" aria-labelledby="meters-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M13</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--infer">口径对照</span><span class="mech-time">约 5 分钟 · 三块仪表</span></div>
+          <h2 id="meters-title">GPU busy、MFU、吞吐：三块仪表，三个问题</h2>
+          <p class="mech-thesis">设备有工作，不等于 Tensor Core 做了很多有用矩阵乘；MFU 高，不等于用户每秒收到更多有效 token；吞吐变好，也可能来自少做必做工作，而不是把设备用得更满。读性能数字前先问：它记的是设备活动、主模型记账，还是用户可见结果？</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>设备</dt><dd>有 kernel / 通信 / 拷贝</dd></div>
+          <div><dt>约定</dt><dd>主模型 FP8 等价记账</dd></div>
+          <div><dt>用户</dt><dd>TTFT、TBT、有效 token</dd></div>
+        </dl>
+      </header>
+
+      <div class="pf-meters">
+        <article class="pf-meter pf-meter--busy">
+          <div class="pf-meter__head"><span class="tag tag--infer">设备</span><span>01</span></div>
+          <h3>GPU busy</h3>
+          <p>设备时间轴上有 kernel、通信或拷贝在跑。它不保证这些工作都是有用的主模型矩阵乘，也不告诉你用户是否在等。</p>
+          <p class="pf-meter__not"><b>不能推出：</b>MFU 高、吞吐高、延迟低。</p>
+        </article>
+        <article class="pf-meter pf-meter--mfu">
+          <div class="pf-meter__head"><span class="tag tag--source">约定口径</span><span>02</span></div>
+          <h3>MFU</h3>
+          <p>按 FP8 等价记账的主模型工作量，除以首尾窗口、CP 与口径峰值。它是理论峰值的利用率，不是设备活动百分比。</p>
+          <p class="pf-meter__not"><b>不能推出：</b>用户 token 速率、首 token 延迟、内容质量。</p>
+        </article>
+        <article class="pf-meter pf-meter--throughput">
+          <div class="pf-meter__head"><span class="tag tag--sim">用户</span><span>03</span></div>
+          <h3>吞吐 / 延迟</h3>
+          <p>用户每秒拿到多少有效 token，以及 TTFT、相邻 token 时间。少做必做工作可能提高吞吐，却不提高 MFU；推测解码多做的草稿计算也不计入这仓主模型分子。</p>
+          <p class="pf-meter__not"><b>不能推出：</b>设备峰值利用率、单个 kernel 效率。</p>
+        </article>
+      </div>
+
+      <div class="pf-lanes" aria-label="同一时间窗口的三种记账方式示意">
+        <div class="pf-lanes__head"><span>同一段墙钟时间 / 示意，不对应 trace</span><span>三种问题</span></div>
+        <div class="pf-lane">
+          <span class="pf-lane__label">设备活动</span>
+          <span class="pf-lane__track"><i class="pf-lane__fill pf-lane__fill--busy" style="width:82%"></i><i class="pf-lane__gap" style="width:9%;left:82%"></i></span>
+          <small>有活，不代表都是有用 GEMM</small>
+        </div>
+        <div class="pf-lane">
+          <span class="pf-lane__label">主模型记账</span>
+          <span class="pf-lane__track"><i class="pf-lane__fill pf-lane__fill--mfu" style="width:56%"></i><i class="pf-lane__hatch" style="width:26%;left:56%"></i></span>
+          <small>只记约定 contractions；draft / pad / replicas 不计</small>
+        </div>
+        <div class="pf-lane">
+          <span class="pf-lane__label">用户可见</span>
+          <span class="pf-lane__track"><i class="pf-lane__fill pf-lane__fill--out" style="width:34%"></i></span>
+          <small>有效输出 token 与等待时间，不是设备字节数</small>
+        </div>
+        <p class="pf-lanes__foot">条形长度仅为教学示意，没有任何毫秒或百分比含义；重叠的区域也不能重复计入总时间。</p>
+      </div>
+
+      <div class="pf-callout">
+        <span class="tag tag--infer">最常混的一步</span>
+        <p>把 GPU busy 百分比直接当 MFU，或把日志 MFU 乘上 world_size 当“整机效率”。前者换了分子，后者换了分母；两者都不再是 <code>stats_logger</code> 定义的量。若跨精度比较，还要先把 FP4/FP8/BF16/FP32 的记账系数统一。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="scope" aria-labelledby="scope-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M14</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">约 6 分钟 · 分子账本</span></div>
+          <h2 id="scope-title">分子只记主模型的 FP8 等价工作量</h2>
+          <p class="mech-thesis"><code>flops_estimator.hpp</code> 估算主模型主要 contractions 的等价 FLOPs：GEMM 系数已包含乘加两次 FLOP。它排除 draft、padding 与 replicas，省略 norm/activation 小算术，vision 仍是 TODO；调度 q/k 也没有扣除 acceptance 或 ZOS 后续修正。因此它是“排班主模型工作量”的估算，不是最终接受 token 的实测 FLOPs。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>单位</dt><dd>TFLOPs（工作量）</dd></div>
+          <div><dt>记账</dt><dd>FP8 等价系数</dd></div>
+          <div><dt>不包含</dt><dd>draft / pad / replicas</dd></div>
+        </dl>
+      </header>
+
+      <div class="pf-scope">
+        <div class="pf-scope__main">
+          <div class="pf-scope__head"><span>IN / 主模型估算</span><span>FP8-equivalent</span></div>
+          <div class="pf-scope__chips">
+            <span>主模型主要 contractions</span>
+            <span>attention <small>已含在 total</small></span>
+            <span>量化 GEMM 等价</span>
+          </div>
+          <p><b>total 已包含 attention。</b><code>calc_flops</code> 返回 attention 与 total；再把 attention 加到 total 上会重复。norm、activation 等小算术被省略，不代表它们运行时免费。</p>
+        </div>
+        <div class="pf-scope__out">
+          <div class="pf-scope__head"><span>OUT / 不进入这个分子</span><span>边界</span></div>
+          <ul>
+            <li><b>draft</b><span>草稿模型的计算；DSpark 的草稿与验证另算。</span></li>
+            <li><b>padding</b><span>图档补齐或批次对齐产生的行。</span></li>
+            <li><b>replicas</b><span>冗余副本 / 负载均衡副本。</span></li>
+            <li><b>vision</b><span>视觉估算仍是 TODO。</span></li>
+            <li><b>修正</b><span>未扣 acceptance / ZOS 后续变化。</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="pf-coefs" aria-label="FP8 等价记账系数">
+        <div class="pf-coef"><span>FP4</span><strong>1×</strong><small>存储/计算组合仍要看实现</small></div>
+        <div class="pf-coef"><span>FP8</span><strong>2×</strong><small>本仓 MFU 的等价基准</small></div>
+        <div class="pf-coef"><span>BF16</span><strong>4×</strong><small>相对 FP8 的记账系数</small></div>
+        <div class="pf-coef"><span>TF32 / FP32</span><strong>8×</strong><small>同文件参考系数</small></div>
+      </div>
+      <p class="pf-coef-note">这些是<b>等价记账系数</b>，不是硬件真正执行的指令数；FP4 存储不自动等于 FP4×FP4 计算。跨精度比较前先统一口径，别把系数差当成实测加速比。</p>
+
+      <div class="out-source">
+        <div class="out-source__grid">
+          <article class="out-src-card">
+            <span class="out-src-card__kind">ESTIMATOR</span>
+            <h3>系数与排除项</h3>
+            <p>定义与系数在文件头；FP4/FP8/BF16/FP32 的等价系数、draft/padding/replicas 的排除都在这里。</p>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/flops_estimator.hpp#L13-L27" target="_blank" rel="noopener noreferrer">flops_estimator.hpp:13–27 <span aria-hidden="true">↗</span></a>
+          </article>
+          <article class="out-src-card">
+            <span class="out-src-card__kind">RETURN</span>
+            <h3>attention 与 total</h3>
+            <p><code>calc_flops:39–44</code> 返回 attention 和 total；total 已含 attention。vision 的 TODO 与调度修正也在同文件后文。</p>
+            <div class="out-src-links">
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/flops_estimator.hpp#L39-L44" target="_blank" rel="noopener noreferrer">:39–44</a>
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/flops_estimator.hpp#L86" target="_blank" rel="noopener noreferrer">:86</a>
+              <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/flops_estimator.hpp#L213" target="_blank" rel="noopener noreferrer">:213</a>
+            </div>
+          </article>
+          <article class="out-src-card">
+            <span class="out-src-card__kind">PEAK</span>
+            <h3>峰值口径</h3>
+            <p><code>llm_engine.py:304</code> 把 <code>get_bf16_tflops_limit()</code> 乘 2 作为 FP8 等价峰值；设备表是仓内参考值，不是本机检测。</p>
+            <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/llm_engine.py#L304" target="_blank" rel="noopener noreferrer">llm_engine.py:304 <span aria-hidden="true">↗</span></a>
+          </article>
+        </div>
+        <div class="source-read out-source__read">
+          <p class="source-read__label">逐项读 / 单位先对齐</p>
+          <ol class="line-notes">
+            <li><b>分子</b><span><strong>TFLOPs 是工作量，不是 TFLOP/s。</strong>公式先除以时间得到速率，再除以并行大小与峰值，才变成无量纲的 MFU。</span></li>
+            <li><b>attention</b><span><strong>total 已含 attention。</strong>看到两个返回值时，不要把两者相加；这是读日志/改公式最容易犯的一次重复。</span></li>
+            <li><b>排除项</b><span><strong>draft、padding、replicas 不在这个分子里。</strong>这会让 MFU 与“设备总 FLOPs”或“用户有效 token”都不同；不要用一个替代另一个。</span></li>
+            <li><b>估算</b><span><strong>调度 q/k 未按 acceptance/ZOS 后续修正。</strong>所以分子更像“排班主模型工作量”，不是最终被接受 token 的实测。</span></li>
+          </ol>
+          <p class="source-bridge"><b>这不是“越低精度越好”的证明。</b>等价系数只是统一记账；精度、数值质量、硬件支持与真实 kernel 效率要另测。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="evidence" aria-labelledby="evidence-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M15</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">验证路线</span><span class="tag tag--deploy">生产边界</span><span class="mech-time">约 7 分钟 · 能测什么</span></div>
+          <h2 id="evidence-title">benchmark、sweep 与本地：各自只能证明一段</h2>
+          <p class="mech-thesis">官方 benchmark 可配置采集 trace，但强制 load balance、使用随机 token；sweep 脚本本身强制 <code>PROFILE=0</code>，不采 trace；Pareto 图用传入接受率做 τ 换算，不等于实测有效输出吞吐。生产服务还包含公开仓未交付的 PD 分离、外部 KV 与跨 DP 负载均衡。本站没有 GPU、完整源码副本或权重，最多给出验证计划，不能给出实测结论。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>benchmark</dt><dd>可采 trace，质量另说</dd></div>
+          <div><dt>sweep</dt><dd>PARETO 换算，非 trace</dd></div>
+          <div><dt>本地</dt><dd>无 GPU / 无权重</dd></div>
+        </dl>
+      </header>
+
+      <div class="pf-evidence">
+        <article class="pf-evidence__card">
+          <div class="pf-evidence__head"><span class="tag tag--source">官方示例</span><span>benchmark.py</span></div>
+          <h3>可采 trace，但不能替代真实任务</h3>
+          <p>示例入口可配置采集 trace；但 <code>benchmark.py:165</code> 强制 load balance，<code>:299</code> 使用随机 token。它能暴露调度与步速，不能替代真实 prompt / 输出质量、线上路由与业务分布。</p>
+          <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/examples/benchmark.py#L299" target="_blank" rel="noopener noreferrer">benchmark.py:299 <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="pf-evidence__card">
+          <div class="pf-evidence__head"><span class="tag tag--source">官方示例</span><span>run_sweep.sh</span></div>
+          <h3>sweep 本身不做 trace</h3>
+          <p><code>run_sweep.sh:71–76</code> 强制 <code>PROFILE=0</code>。它适合批量跑参数组合；不要从 sweep 结果反推已有 kernel trace 或细粒度设备时间线。</p>
+          <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/examples/sweep/run_sweep.sh#L71-L76" target="_blank" rel="noopener noreferrer">run_sweep.sh:71–76 <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="pf-evidence__card">
+          <div class="pf-evidence__head"><span class="tag tag--source">官方示例</span><span>plot_pareto.py</span></div>
+          <h3>接受率换算是换算</h3>
+          <p><code>plot_pareto.py:58–67</code> 用传入接受率计算 <code>τ = 1 + nextn × a</code>，并拒绝 <code>mtp_varlen=1</code>。这是基于实测步速的换算，不是实测有效输出吞吐。</p>
+          <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/examples/sweep/plot_pareto.py#L58-L67" target="_blank" rel="noopener noreferrer">plot_pareto.py:58–67 <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="pf-evidence__card pf-evidence__card--deploy">
+          <div class="pf-evidence__head"><span class="tag tag--deploy">生产描述</span><span>README</span></div>
+          <h3>开源仓不是完整线上服务</h3>
+          <p>完整 KV cache 服务、VE/Prefill/Decode 分离与跨 DP 副本 LB 不在这次 README 范围内；引擎保留 <code>init_pd_split</code> 等扩展钩子，但名字存在不等于完整生产系统已实现。</p>
+          <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/README.md#L38-L42" target="_blank" rel="noopener noreferrer">README.md:38–42 <span aria-hidden="true">↗</span></a>
+        </article>
+      </div>
+
+      <div class="pf-tau-card" data-lab="tau">
+        <div class="pf-tau-card__head">
+          <div>
+            <span class="tag tag--sim">教学换算</span>
+            <h3>接受率 → τ，不 → 实测吞吐</h3>
+          </div>
+          <p>公式来自官方 Pareto 脚本；这里只让输入变化，不把输出当成本站数据。</p>
+        </div>
+        <div class="pf-tau-grid">
+          <div class="pf-tau-controls">
+            <div class="pf-control pf-control--nextn">
+              <span><b>nextn</b><small>每个草稿组的额外位置数</small></span>
+              <div class="seg" role="group" aria-label="选择 nextn">
+                <button type="button" data-tau-nextn="1" aria-pressed="false">1</button>
+                <button type="button" data-tau-nextn="2" aria-pressed="true">2</button>
+                <button type="button" data-tau-nextn="3" aria-pressed="false">3</button>
+              </div>
+            </div>
+            <label class="pf-control" for="pf-acc">
+              <span><b>接受率 a</b><small>输入假设，不是本页测量</small></span>
+              <input id="pf-acc" type="range" min="0" max="100" step="1" value="60" data-tau-acc>
+              <output for="pf-acc" data-tau-acc-out>60%</output>
+            </label>
+            <p class="pf-tau-note">脚本拒绝 <code>mtp_varlen=1</code>；这里的 a 是外部传入量。若 a 或 nextn 不是来自同一实测配置，τ 不能跨系统比较。</p>
+          </div>
+          <div class="pf-tau-result" aria-live="polite">
+            <span>τ = 1 + nextn × a</span>
+            <strong data-tau-result>2.20</strong>
+            <small data-tau-sub>1 + 2 × 0.60 = 2.20</small>
+            <p>每步等效输出 token 的<b>换算值</b>，不是本站实测吞吐或加速比。</p>
+          </div>
+        </div>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 回退</h4>
+          <p>默认 nextn=2、a=0.60：τ = 1 + 2 × 0.60 = <b>2.20</b>。这是公式换算，不是有效输出吞吐实测；<code>plot_pareto.py</code> 还拒绝 <code>mtp_varlen=1</code>。没有同配置的步速、接受率与质量数据时，不能把 τ 当成线上收益。</p>
+        </div>
+      </div>
+
+      <div class="pf-plan">
+        <div class="pf-plan__head">
+          <span class="tag tag--source">验证计划</span>
+          <h3>要复现一组成绩，至少固定这些</h3>
+          <p>来自 README / benchmark / mfu 的验证条件交集。本站没有执行下列 GPU 运行，只给出清单。</p>
+        </div>
+        <ol>
+          <li><b>源码与模型</b><span>固定 SHA、checkpoint、tokenizer；记录 refs 模型结构快照来源。</span></li>
+          <li><b>设备与精度</b><span>设备型号、峰值口径、CUDA/CANN、FP8/FP4/BF16 组合、是否实测峰值。</span></li>
+          <li><b>并行拓扑</b><span>DP / CP / EP 与 world_size；MFU 公式只除 MP=CP，不要把 EP 再除一次。</span></li>
+          <li><b>负载</b><span>输入/输出长度、并发、batch 形状、cache 命中率、采样参数、MTP 设置。</span></li>
+          <li><b>读什么</b><span>同时报告 MFU、吞吐、TTFT/TBT、质量或接受率；吞吐不能替代精度校验。</span></li>
+          <li><b>怎么改</b><span>每次只改变一个机制，保留同配置基线；官方 README 图是特定配置，不是本站实测。</span></li>
+        </ol>
+      </div>
+
+      <div class="pf-evidence-table">
+        <div class="pf-evidence-table__head"><span>机制到性能的因果</span><span>不是数值保证</span></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>机制</th><th>可能改善</th><th>代价 / 条件</th><th>验证观察</th></tr></thead>
+            <tbody>
+              <tr><td>ZOS</td><td>CPU 调度、后处理造成的 GPU 空档</td><td>跨步依赖与资源延迟释放更复杂</td><td>CPU/GPU trace、step 空隙</td></tr>
+              <tr><td>Batch / EP</td><td>专家拿到更多 token，矩阵形状与权重复用</td><td>排队、通信与负载偏斜</td><td>每专家 token 数、GEMM 时长、TBT</td></tr>
+              <tr><td>EPLB</td><td>最慢 rank 的等待</td><td>冗余权重显存、重排成本</td><td>rank 分布、max/mean 负载</td></tr>
+              <tr><td>DSpark</td><td>按接受预期分配验证预算</td><td>草稿开销、接受率、曲线校准</td><td>accepted/verified length、端到端 TPS</td></tr>
+              <tr><td>融合 / 低精度</td><td>中间写回、launch、字节量</td><td>精度、量化与硬件支持</td><td>kernel trace、HBM bytes、误差/质量</td></tr>
+              <tr><td>压缩 / 稀疏 / YOCO</td><td>必须读取和计算的历史量</td><td>索引/压缩成本、近似边界</td><td>attention 时长、KV bytes、质量</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>表的用途是提醒“改善什么、付什么代价、看什么指标”，不是给任何机制标一个固定收益。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="out-band out-band--boundary" id="boundary" aria-labelledby="boundary-title">
+    <div class="wrap">
+      <div class="out-band__head">
+        <div>
+          <p class="eyebrow"><span class="eyebrow__rule"></span>边界 / WHAT THIS SITE CAN SAY</p>
+          <h2 id="boundary-title">本站能声称与不能声称的</h2>
+        </div>
+        <p>没有 DeepInfer 完整源码副本、没有模型权重、没有 GPU 实测。refs 里的模型定义是用户授权的官方 HF 结构快照；它不等于完整实现或可运行权重。</p>
+      </div>
+      <div class="pf-boundary-grid">
+        <article>
+          <span class="tag tag--source">能</span>
+          <p>按固定 SHA 解释公式、行号、状态变化与调用关系；用明确标注的假设算例演示口径；指出官方 benchmark / sweep / 生产描述的边界。</p>
+        </article>
+        <article>
+          <span class="tag tag--deploy">不能</span>
+          <p>不能声称本站跑过 GPU、得到过某个 MFU/吞吐/加速比；不能把官方 README 图当成本站数据；不能把教学算例泛化到任意设备、batch 或模型。</p>
+        </article>
+        <article>
+          <span class="tag tag--infer">推断</span>
+          <p>机制到性能的因果只能在“改善什么、代价是什么、需要什么观察”层面表述。任何具体数值收益都必须来自同配置实测，并同时报告质量与边界。</p>
+        </article>
+      </div>
+      <p class="pf-boundary-foot">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-26 · 上游 <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">DeepSeek-AI / DeepInfer</a> · Apache-2.0 短段摘录 · 无本机 GPU 数据</p>
+    </div>
+  </section>
+
+  <nav class="unit-turn" aria-label="单元导航">
+    <div class="wrap unit-turn__in">
+      <a href="sampling.html">
+        <small>上一单元</small>
+        <span><strong>采样与结构</strong><span class="micro-note" style="display:block">候选分布、DSpark 与结构化输出</span></span>
+      </a>
+      <div class="unit-turn__mid"><span>05 / 05</span><i aria-hidden="true"></i><span>测量与效率</span></div>
+      <a class="unit-turn__next" href="index.html#glossary">
+        <small>NEXT / 资料</small>
+        <span><strong>术语与资料</strong><span class="micro-note" style="display:block">回看术语、固定源码与结构文件</span></span>
+      </a>
+    </div>
+  </nav>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap site-footer__in">
+    <div>
+      <a class="brand brand--footer" href="index.html">
+        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/><path class="brand__cut" d="M5 19h30M18 8v24"/></svg>
+        <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+      </a>
+      <p>中文、面向初学者、可回到固定源码行号的 DeepInfer 教学站。</p>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+      <a href="index.html#glossary">术语</a>
+      <a href="index.html#resources">资料下载</a>
+      <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 ↗</a>
+    </div>
+    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-26 · 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
+  </div>
+</footer>
+</body>
+</html>

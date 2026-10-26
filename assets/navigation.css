@@ -1,0 +1,52 @@
+/* Unified seven-page navigation and chapter jump links.
+   Loaded after site.css; layout only, no animation changes. */
+
+.primary-nav a { padding-inline: 10px; }
+
+/* Homepage atlas: turn a mechanism/module selection into a chapter entry. */
+.readout-chapter {
+  display: inline-flex; align-items: center; gap: 7px;
+  flex-basis: 100%; width: fit-content;
+  padding: 6px 9px;
+  border: 1px solid var(--ink); background: var(--sulphur); color: var(--ink);
+  font-family: var(--font-mono); font-size: 9.5px; line-height: 1.4;
+  text-decoration: none;
+}
+.readout-chapter:hover { background: var(--ink); border-color: var(--ink); color: var(--sulphur); }
+.readout-chapter span { font-size: 12px; line-height: 1; }
+
+.atlas-jumps {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 7px 13px;
+  margin-top: 10px; padding-top: 12px; border-top: 1px dotted var(--line-dark);
+  font-family: var(--font-mono); font-size: 9.5px; color: var(--muted);
+}
+.atlas-jumps__label { color: var(--ink-soft); letter-spacing: .03em; }
+.atlas-jumps a {
+  color: var(--teal); text-decoration: none; border-bottom: 1px dotted var(--line-dark);
+  padding-bottom: 1px;
+}
+.atlas-jumps a:hover { color: var(--signal); border-bottom-color: var(--signal); }
+
+@media (max-width: 1120px) {
+  .primary-nav a { padding-inline: 8px; }
+}
+
+@media (max-width: 720px) {
+  .site-header__in {
+    flex-wrap: wrap; align-items: center; overflow: visible;
+    min-height: 0; gap: 0 12px; padding-top: 4px;
+  }
+  .brand { min-height: 38px; }
+  .primary-nav {
+    order: 3; flex: 1 0 100%; align-self: auto;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+    gap: 0; margin-left: 0; overflow: visible;
+    border-top: 1px solid var(--line-dark);
+  }
+  .primary-nav a {
+    justify-content: center; min-height: 33px; padding: 0 4px;
+    border-right: 1px solid rgb(20 44 43 / 8%); border-bottom: 0;
+    font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .primary-nav a[aria-current="page"] { background: var(--signal-pale); }
+}

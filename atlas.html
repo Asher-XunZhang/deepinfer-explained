@@ -1,0 +1,1384 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeepInfer 机制剖面速查 · KV / 层间来源 / YOCO</title>
+  <meta name="description" content="面向初学者的 DeepInfer 静态机制剖面速查：KV 的逻辑位置、物理块与共享；层间 KV / index-K / Top-k 来源；同一坐标下 YOCO off / mask / compact 的可见域差异。固定源码 SHA，无 GPU 实测。">
+  <meta name="color-scheme" content="light">
+  <meta property="og:title" content="DeepInfer 机制剖面速查">
+  <meta property="og:description" content="三张静态剖面：KV 落点、层间来源、YOCO 同坐标。没有播放按钮，直接读图。">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/navigation.css">
+  <link rel="stylesheet" href="assets/atlas.css">
+</head>
+<body class="sheet-page">
+<a class="skip-link" href="#main">跳到正文</a>
+
+<div class="version-bar">
+  <div class="wrap version-bar__in">
+    <span>固定源码 <code>5537415</code></span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>分析日期 2026-10-26</span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>静态阅读 · 无 GPU 实测</span>
+    <a href="#sources">证据边界</a>
+  </div>
+</div>
+
+<header class="site-header">
+  <div class="wrap site-header__in">
+    <a class="brand" href="index.html" aria-label="DeepInfer 剖面首页">
+      <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
+        <path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/>
+        <path class="brand__cut" d="M5 19h30M18 8v24"/>
+      </svg>
+      <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+    </a>
+    <nav class="primary-nav" aria-label="全站导航">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html" aria-current="page">整机图谱</a>
+    </nav>
+    <span class="header-status"><i aria-hidden="true"></i>整机图谱</span>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="sheet-hero" aria-labelledby="hero-title">
+    <div class="wrap sheet-hero__grid">
+      <div class="sheet-hero__copy">
+        <p class="eyebrow"><span class="eyebrow__rule"></span>MECHANISM ATLAS / 静态剖面速查</p>
+        <h1 id="hero-title">三张剖面，<br><span>把机制摊在坐标上。</span></h1>
+        <p class="sheet-hero__lede">不用播放，也不用先读完整章。把 KV 的落点、层间的三种来源、YOCO 的三种可见域，压到同一套坐标和图例里；每张图都能直接找到对象、范围和源码行号。</p>
+        <div class="sheet-hero__actions">
+          <a class="button button--primary" href="#legend">先认图例</a>
+          <a class="button button--quiet" href="#kv">从 KV 落点开始</a>
+        </div>
+        <p class="sheet-hero__note">适合初学者的静态阅读：先认图例，再沿编号读图。逻辑示意，不是实际字节 ABI。</p>
+      </div>
+
+      <nav class="sheet-plate-index" aria-label="三张图版">
+        <div class="sheet-plate-index__head">
+          <span>图版索引</span><span>3 PLATES</span>
+        </div>
+        <a class="sheet-plate-index__item sheet-plate-index__item--kv" href="#kv">
+          <span class="sheet-plate-index__no">01</span>
+          <span class="sheet-plate-index__copy"><strong>KV 的三层落点</strong><small>pos 5 → 逻辑页 → 物理槽</small></span>
+          <span class="sheet-plate-index__arrow" aria-hidden="true">↘</span>
+        </a>
+        <a class="sheet-plate-index__item sheet-plate-index__item--layers" href="#layers">
+          <span class="sheet-plate-index__no">02</span>
+          <span class="sheet-plate-index__copy"><strong>层间来源</strong><small>KV · index-K · Top-k</small></span>
+          <span class="sheet-plate-index__arrow" aria-hidden="true">↘</span>
+        </a>
+        <a class="sheet-plate-index__item sheet-plate-index__item--yoco" href="#yoco">
+          <span class="sheet-plate-index__no">03</span>
+          <span class="sheet-plate-index__copy"><strong>YOCO 同坐标</strong><small>off · mask · compact</small></span>
+          <span class="sheet-plate-index__arrow" aria-hidden="true">↘</span>
+        </a>
+        <p class="sheet-plate-index__note">0 个播放按钮 · 全部为静态版</p>
+      </nav>
+    </div>
+    <div class="sheet-hero__meta">
+      <div class="wrap sheet-hero__meta-in">
+        <span><b>3</b> 张图版</span>
+        <span><b>1</b> 套共享图例</span>
+        <span><b>0</b> 播放 / 动画</span>
+        <span><b>0</b> GPU 实测数字</span>
+        <span class="sheet-hero__meta-fixed">block_size=4 · L=12 · W=4</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="sheet-legend" id="legend" aria-labelledby="legend-title">
+    <div class="wrap">
+      <header class="sheet-legend__head">
+        <div>
+          <p class="eyebrow"><span class="eyebrow__rule"></span>图例 / SHARED KEY</p>
+          <h2 id="legend-title">同一套记号，三张图都能读。</h2>
+        </div>
+        <p class="sheet-legend__intro">颜色和线型只做辅助；每个对象都直接写了名字、块号或区间。读图时依次找：对象在哪、关系是什么、这个格是否有效。</p>
+      </header>
+
+      <div class="sheet-legend__grid">
+        <div class="sheet-key-group">
+          <p class="sheet-key-group__label">关系 / RELATION</p>
+
+          <div class="sheet-key-item">
+            <span class="sheet-glyph sheet-glyph--solid" aria-hidden="true"></span>
+            <div><b>实线 → 编号 / 引用</b><p>CPU 的 block_table 指向物理块；指向不等于复制 KV 字节。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-glyph sheet-glyph--dashed" aria-hidden="true"></span>
+            <div><b>虚线 ⇢ 读取已有数据</b><p>后续层读取已经存在的 KV 或 index-K；本页不主张重新分配。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-glyph sheet-glyph--dotted" aria-hidden="true"></span>
+            <div><b>点线 ⋯→ 传递选择</b><p>Top-k 的候选位置或选择结果被后续层沿用。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-glyph sheet-glyph--shared" aria-hidden="true">×2</span>
+            <div><b>×2 共享引用</b><p>多条引用指向同一物理对象；ref_count 增加，字节不复制。</p></div>
+          </div>
+        </div>
+
+        <div class="sheet-key-group">
+          <p class="sheet-key-group__label">填色 / FILL</p>
+
+          <div class="sheet-key-item">
+            <span class="sheet-swatch sheet-swatch--used" aria-hidden="true"></span>
+            <div><b>已用 / 可见</b><p>KV 槽已经写入，或 attention 中这个 key 对该 query 可见。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-swatch sheet-swatch--free" aria-hidden="true"></span>
+            <div><b>容量存在 / 未用</b><p>槽位还在物理块里，本算例没有写入。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-swatch sheet-swatch--absent" aria-hidden="true"></span>
+            <div><b>不生成 / 未执行</b><p>本模式没有这一行、这一格或这一步；用斜线表示。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-swatch sheet-swatch--empty" aria-hidden="true">∅</span>
+            <div><b>∅ 空窗口</b><p>query 行存在，但在 SWA 可见域内没有任何可见 key；这不代表整个 attention 没有 key。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-swatch sheet-swatch--start" aria-hidden="true"></span>
+            <div><b>珊瑚竖线 / start=4</b><p>YOCO 算例中 SWA 可见域的下界：k&lt;4 不再对 mask / compact 可用。</p></div>
+          </div>
+        </div>
+
+        <div class="sheet-key-group">
+          <p class="sheet-key-group__label">直接标注 / LABEL</p>
+
+          <div class="sheet-key-item">
+            <span class="sheet-label-chip sheet-label-chip--target">pos 5</span>
+            <div><b>被追踪的坐标</b><p>pos 是序列里的逻辑位置，不是物理块号。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-label-chip"><b>b2</b><span>/</span><b>p4</b></span>
+            <div><b>b = 物理块编号，p = 序列逻辑位置；槽 = 块内 offset</b><p>b2 是设备上的物理块 2；p4 是序列逻辑位置 4，落在 b2 的槽 0，不是另一个块。</p></div>
+          </div>
+          <div class="sheet-key-item">
+            <span class="sheet-label-chip">[1,5)</span>
+            <div><b>左闭右开可见区间</b><p>包含 key 1、2、3、4，不包含 key 5。图中所有区间都按这个写法。</p></div>
+          </div>
+          <p class="sheet-key-group__note">颜色分工：<b class="is-kv">深青 = KV / 可见</b>，<b class="is-idx">紫 = index-K</b>，<b class="is-topk">赭 = Top-k</b>，<b class="is-signal">珊瑚 = 追踪坐标 / 下界</b>。</p>
+        </div>
+      </div>
+
+      <p class="sheet-legend__foot">每张图都可以脱离图例单独阅读：对象名、块号、区间和“复制 / 读取 / 选择”都直接写在图上。</p>
+    </div>
+  </section>
+
+  <section class="sheet-plate sheet-plate--kv" id="kv" aria-labelledby="kv-title">
+    <div class="wrap">
+      <header class="sheet-plate__head">
+        <div class="sheet-plate__no" aria-hidden="true">01</div>
+        <div class="sheet-plate__intro">
+          <p class="eyebrow"><span class="eyebrow__rule"></span>KV / 逻辑 · 物理 · 共享</p>
+          <h2 id="kv-title">pos 5 的 KV 在哪？<br>先找编号，再找槽。</h2>
+          <p class="sheet-plate__lede">CPU 侧的 Sequence 只持有 <code>block_table</code>；真正的 KV 数据在 CacheEngine 的设备 tensor 里。这个算例把 A 的 10 个历史位置折成 3 个物理块，并让 A 与 A′ 显式共享最后一个块。</p>
+        </div>
+        <dl class="sheet-plate__facts">
+          <div><dt>教学块大小</dt><dd>block_size = 4</dd></div>
+          <div><dt>A 的逻辑位置</dt><dd>0–9（10 个）</dd></div>
+          <div><dt>block_table</dt><dd>[7, 2, 9]</dd></div>
+          <div><dt>证据性质</dt><dd>逻辑示意，不是字节 ABI</dd></div>
+        </dl>
+      </header>
+
+      <figure class="sheet-figure sheet-figure--kv">
+        <figcaption class="sheet-figure__head">
+          <div>
+            <span class="sheet-figure__tag">图 1A</span>
+            <h3>位置 → 逻辑页 → 物理块 → 槽</h3>
+          </div>
+          <p>固定算例：<code>block_size = 4</code>，A 有 10 个历史位置。</p>
+        </figcaption>
+
+        <div class="sheet-seq">
+          <div class="sheet-seq__id">
+            <p class="sheet-kicker">CPU / SEQUENCE A</p>
+            <strong>10 个历史位置</strong>
+            <p>持有编号与 block_table，不持有 KV 字节。</p>
+          </div>
+          <div class="sheet-seq__ledger">
+            <div><span>block_table</span><b>[7, 2, 9]</b></div>
+            <div><span>逻辑页</span><b>0 / 1 / 2</b></div>
+            <div><span>设备端</span><b>CacheEngine</b></div>
+          </div>
+        </div>
+
+        <div class="sheet-map">
+          <div class="sheet-map__head" aria-hidden="true">
+            <span>逻辑位置</span><span>block_table 索引</span><span>物理块与槽</span>
+          </div>
+
+          <div class="sheet-map__row">
+            <div class="sheet-lpage">
+              <div class="sheet-lpage__top"><span>逻辑页 0</span><span>4 个已用</span></div>
+              <ol class="sheet-poslist">
+                <li>0</li><li>1</li><li>2</li><li>3</li>
+              </ol>
+            </div>
+            <div class="sheet-index">
+              <code>block_table[0]</code><span aria-hidden="true">→</span><b>b7</b>
+            </div>
+            <div class="sheet-block">
+              <div class="sheet-block__head"><b>b7</b><span>4 / 4</span></div>
+              <div class="sheet-slots" aria-label="物理块 7 的四个槽：逻辑位置 0、1、2、3">
+                <span class="sheet-slot is-used"><b>p0</b><small>槽0</small></span>
+                <span class="sheet-slot is-used"><b>p1</b><small>槽1</small></span>
+                <span class="sheet-slot is-used"><b>p2</b><small>槽2</small></span>
+                <span class="sheet-slot is-used"><b>p3</b><small>槽3</small></span>
+              </div>
+              <p class="sheet-block__note">A · 位置 0–3</p>
+            </div>
+          </div>
+
+          <div class="sheet-map__row is-target">
+            <div class="sheet-lpage">
+              <div class="sheet-lpage__top"><span>逻辑页 1</span><span class="sheet-target-note">追踪 pos 5</span></div>
+              <ol class="sheet-poslist">
+                <li>4</li><li class="is-target">5</li><li>6</li><li>7</li>
+              </ol>
+            </div>
+            <div class="sheet-index">
+              <code>block_table[1]</code><span aria-hidden="true">→</span><b>b2</b>
+            </div>
+            <div class="sheet-block is-target">
+              <div class="sheet-block__head"><b>b2</b><span>4 / 4 · 目标槽 1</span></div>
+              <div class="sheet-slots" aria-label="物理块 2 的四个槽：逻辑位置 4、5、6、7；pos 5 在槽 1">
+                <span class="sheet-slot is-used"><b>p4</b><small>槽0</small></span>
+                <span class="sheet-slot is-used is-target"><b>p5</b><small>槽1</small></span>
+                <span class="sheet-slot is-used"><b>p6</b><small>槽2</small></span>
+                <span class="sheet-slot is-used"><b>p7</b><small>槽3</small></span>
+              </div>
+              <p class="sheet-block__note">A · 位置 4–7（追踪 pos 5）</p>
+            </div>
+          </div>
+
+          <div class="sheet-map__row">
+            <div class="sheet-lpage">
+              <div class="sheet-lpage__top"><span>逻辑页 2</span><span>只到 pos 9</span></div>
+              <ol class="sheet-poslist sheet-poslist--tail">
+                <li>8</li><li>9</li>
+              </ol>
+            </div>
+            <div class="sheet-index">
+              <code>block_table[2]</code><span aria-hidden="true">→</span><b>b9</b>
+            </div>
+            <div class="sheet-block is-shared">
+              <div class="sheet-block__head"><b>b9</b><span class="sheet-shared-badge">×2 共享</span></div>
+              <div class="sheet-slots" aria-label="物理块 9 有四个槽；逻辑位置 8、9 已用，另外两个槽未写入；A 与 A′ 共享这个块">
+                <span class="sheet-slot is-used"><b>p8</b><small>槽0</small></span>
+                <span class="sheet-slot is-used"><b>p9</b><small>槽1</small></span>
+                <span class="sheet-slot is-free"><b>未写入</b><small>槽2</small></span>
+                <span class="sheet-slot is-free"><b>未写入</b><small>槽3</small></span>
+              </div>
+              <p class="sheet-block__note">A + A′ 共享 · 2 / 4 已用</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="sheet-work">
+          <span class="sheet-work__label">本图追踪</span>
+          <p><b>pos 5</b><span aria-hidden="true">→</span> 逻辑页 <code>floor(5 / 4) = 1</code><span aria-hidden="true">→</span> 物理块 <code>block_table[1] = 2</code><span aria-hidden="true">→</span> 块内槽 <code>5 mod 4 = 1</code></p>
+        </div>
+        <p class="sheet-figure__note">块内 4 个槽是教学容量；“槽”不是 CPU 内存偏移，也不推断真实字节 ABI。物理块编号来自 block_table，不是按逻辑页顺序排列。</p>
+      </figure>
+
+      <div class="sheet-kv-notes">
+        <section class="sheet-note sheet-note--share" aria-labelledby="share-title">
+          <p class="sheet-note__label">共享 / SHARING</p>
+          <h3 id="share-title">A 与 A′ 共享 b9，不是复制两份 KV</h3>
+          <div class="sheet-share-figure" role="img" aria-label="Sequence A 和 A′ 的两条引用都指向物理块 9；块 9 有两个已用槽和两个未写入槽，ref_count 示意为 2。">
+            <div class="sheet-share-figure__refs">
+              <span><b>A</b><small>block_table[2] = 9</small></span>
+              <span><b>A′</b><small>显式共享 b9</small></span>
+            </div>
+            <div class="sheet-share-figure__arrows" aria-hidden="true"><span>→</span><span>→</span></div>
+            <div class="sheet-share-figure__target">
+              <div class="sheet-share-figure__head"><b>b9</b><span>ref_count = 2</span></div>
+              <div class="sheet-mini-slots" aria-hidden="true">
+                <span class="is-used">p8</span><span class="is-used">p9</span><span class="is-free">·</span><span class="is-free">·</span>
+              </div>
+              <p>2 / 4 已用</p>
+            </div>
+          </div>
+          <p>两条引用都指向同一个物理块。只有引用减到 0，b9 才回到 free list；普通在途 metadata 不作为额外引用。整块 b9 仍为 ref_count=2，尾部未写入槽不是 free list 中的可分配块，不能按槽独立分配。</p>
+          <p class="sheet-note__fine">A′ 的其余 block_table 不补全，本图只画显式共享。</p>
+        </section>
+
+        <section class="sheet-note sheet-note--state" aria-labelledby="state-title">
+          <p class="sheet-note__label">STATE / 独立池</p>
+          <h3 id="state-title">block 与 state 分开管理</h3>
+          <div class="sheet-state-pool" role="img" aria-label="独立的 state 池：state 0 保留，state 1 属于 A，state 2 属于 B。">
+            <div class="sheet-state is-reserved"><b>state 0</b><span>保留</span></div>
+            <div class="sheet-state is-a"><b>state 1</b><span>A</span></div>
+            <div class="sheet-state is-b"><b>state 2</b><span>B</span></div>
+          </div>
+          <p>state 是另一只池：本算例里 A 用 state1，另一个 sequence B 用 state2；state0 保留。</p>
+          <p class="sheet-note__fine">block 0 与 state 0 都保留。block 的 ref_count 不会顺带管理 state 的归属。</p>
+        </section>
+
+        <section class="sheet-note sheet-note--misread" aria-labelledby="misread-title">
+          <p class="sheet-note__label">读图检查 / MISREAD</p>
+          <h3 id="misread-title">三个常见误读</h3>
+          <ul class="sheet-mistakes">
+            <li><span class="sheet-cross" aria-hidden="true">×</span><p><b>block_table 不是 KV 字节。</b>它只是 CPU 侧的编号；数据在设备 tensor 里。</p></li>
+            <li><span class="sheet-cross" aria-hidden="true">×</span><p><b>共享不是复制。</b>A / A′ 是两条引用指向 b9，不是两份 b9 数据。</p></li>
+            <li><span class="sheet-cross" aria-hidden="true">×</span><p><b>state 不塞进 block 链。</b>独立池、独立保留槽；不要用一个引用计数解释两者。</p></li>
+          </ul>
+        </section>
+      </div>
+
+      <footer class="sheet-plate__foot">
+        <div class="sheet-sources">
+          <p class="sheet-sources__label">源码锚点 / 固定 <code>5537415</code></p>
+          <div class="sheet-sources__grid">
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">C++ · Sequence</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/sequence.hpp#L200-L227" target="_blank" rel="noopener noreferrer">sequence.hpp:200–227 <span aria-hidden="true">↗</span></a></p>
+              <p>Sequence 生命周期与 block_table 元数据。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">C++ · BlockManager</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/block_manager.hpp#L27-L35" target="_blank" rel="noopener noreferrer">block_manager.hpp:27–35 <span aria-hidden="true">↗</span></a><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/block_manager.hpp#L82-L102" target="_blank" rel="noopener noreferrer">82–102 <span aria-hidden="true">↗</span></a></p>
+              <p>Blocks / free list / ref_count 的账本与归还。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">C++ · 加载计划</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/input_metadata/block_load_plan.cpp#L23-L34" target="_blank" rel="noopener noreferrer">block_load_plan.cpp:23–34 <span aria-hidden="true">↗</span></a></p>
+              <p>逻辑位置、block 内偏移与加载段。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">Python · CacheEngine</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cache_engine.py#L206-L218" target="_blank" rel="noopener noreferrer">cache_engine.py:206–218 <span aria-hidden="true">↗</span></a><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cache_engine.py#L937-L977" target="_blank" rel="noopener noreferrer">937–977 <span aria-hidden="true">↗</span></a></p>
+              <p>设备侧 KV / state tensor 的存储位置。</p>
+            </div>
+          </div>
+        </div>
+        <a class="sheet-next-link" href="runtime.html">
+          <span class="sheet-next-link__label">下一章 / NEXT</span>
+          <strong>运行时与异步</strong>
+          <small>KV 生命周期、加载计划与 state 池</small>
+          <span class="sheet-next-link__arrow" aria-hidden="true">→</span>
+        </a>
+      </footer>
+    </div>
+  </section>
+
+  <section class="sheet-plate sheet-plate--layers" id="layers" aria-labelledby="layers-title">
+    <div class="wrap">
+      <header class="sheet-plate__head">
+        <div class="sheet-plate__no" aria-hidden="true">02</div>
+        <div class="sheet-plate__intro">
+          <p class="eyebrow"><span class="eyebrow__rule"></span>层间来源 / KV · INDEX-K · TOP-K</p>
+          <h2 id="layers-title">第 24 层，三种来源<br>来自同一层吗？</h2>
+          <p class="sheet-plate__lede">不全是。KV 与 index-K 是“读哪一层的已有数据”；Top-k 是“候选位置和选择结果在哪里产生 / 被沿用”。层 24 正好站在分界上：KV 与 index-K 看 20，候选集来自 20，但 Top-k 结果在本层产生。</p>
+        </div>
+        <dl class="sheet-plate__facts">
+          <div><dt>总层数</dt><dd>40 主层 + 3 预测层</dd></div>
+          <div><dt>hidden</dt><dd>5120</dd></div>
+          <div><dt>锚点层</dt><dd>3 / 20 / 24 / 26</dd></div>
+          <div><dt>本图轴</dt><dd>非等比，只抽锚点</dd></div>
+        </dl>
+      </header>
+
+      <figure class="sheet-figure sheet-figure--layers">
+        <figcaption class="sheet-figure__head">
+          <div>
+            <span class="sheet-figure__tag">图 2A</span>
+            <h3>四个锚点层的来源账本</h3>
+          </div>
+          <p>只抽 4 层，不按真实层距等比。层 2 作为层 3 的来源也出现在轴里。</p>
+        </figcaption>
+
+        <div class="sheet-layer-axis" role="img" aria-label="层轴不是等比例：40 个主层加 3 个预测层共 43 层，只标出层 2、3、20、24、26。">
+          <span class="sheet-layer-axis__label">层轴 / 非等比</span>
+          <span class="sheet-layer-pin">02</span>
+          <span class="sheet-layer-pin">03</span>
+          <span class="sheet-layer-gap" aria-hidden="true">· · · ·</span>
+          <span class="sheet-layer-pin">20</span>
+          <span class="sheet-layer-gap" aria-hidden="true">· ·</span>
+          <span class="sheet-layer-pin is-focus">24</span>
+          <span class="sheet-layer-pin">26</span>
+          <span class="sheet-layer-gap" aria-hidden="true">· · ·</span>
+          <span class="sheet-layer-axis__end">43 层</span>
+        </div>
+
+        <div class="sheet-source-table" role="table" aria-label="四个锚点层的 KV、index-K 和 Top-k 来源">
+          <div class="sheet-source-head" role="row">
+            <span role="columnheader">锚点层</span>
+            <span role="columnheader" class="is-kv">KV 来源</span>
+            <span role="columnheader" class="is-idx">index-K 来源</span>
+            <span role="columnheader" class="is-topk">Top-k 来源</span>
+            <span role="columnheader">本层做什么</span>
+          </div>
+
+          <div class="sheet-source-row" role="row">
+            <div class="sheet-layer-stamp" role="rowheader"><b>03</b><span>前一层全给</span></div>
+            <div class="sheet-source-cell" role="cell" data-label="KV 来源"><span class="sheet-src sheet-src--kv"><b>← 02</b><small>沿用</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="index-K 来源"><span class="sheet-src sheet-src--idx"><b>← 02</b><small>沿用</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="Top-k 来源"><span class="sheet-src sheet-src--topk"><b>← 02</b><small>沿用</small></span></div>
+            <div class="sheet-source-action" role="cell" data-label="本层做什么"><p>三样都来自层 2：KV、index-K 与 Top-k 同源。</p></div>
+          </div>
+
+          <div class="sheet-source-row" role="row">
+            <div class="sheet-layer-stamp" role="rowheader"><b>20</b><span>产生候选</span></div>
+            <div class="sheet-source-cell" role="cell" data-label="KV 来源"><span class="sheet-src sheet-src--kv is-self"><b>自身 20</b><small>本层</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="index-K 来源"><span class="sheet-src sheet-src--idx is-self"><b>自身 20</b><small>本层</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="Top-k 来源"><span class="sheet-src sheet-src--topk is-self"><b>自身 20</b><small>产生候选</small></span></div>
+            <div class="sheet-source-action" role="cell" data-label="本层做什么"><p>对全部合法位置评分，产出候选集。</p></div>
+          </div>
+
+          <div class="sheet-source-row is-focus" role="row">
+            <div class="sheet-layer-stamp" role="rowheader"><b>24</b><span>候选内重评</span></div>
+            <div class="sheet-source-cell" role="cell" data-label="KV 来源"><span class="sheet-src sheet-src--kv"><b>← 20</b><small>沿用</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="index-K 来源"><span class="sheet-src sheet-src--idx"><b>← 20</b><small>沿用</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="Top-k 来源"><span class="sheet-src sheet-src--topk"><b>自身 24</b><small>候选来自 20</small></span></div>
+            <div class="sheet-source-action" role="cell" data-label="本层做什么"><p>只对层 20 给出的候选重新评分；选择结果在本层产生。</p></div>
+          </div>
+
+          <div class="sheet-source-row" role="row">
+            <div class="sheet-layer-stamp" role="rowheader"><b>26</b><span>只沿用</span></div>
+            <div class="sheet-source-cell" role="cell" data-label="KV 来源"><span class="sheet-src sheet-src--kv"><b>← 20</b><small>沿用</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="index-K 来源"><span class="sheet-src sheet-src--idx"><b>← 20</b><small>沿用</small></span></div>
+            <div class="sheet-source-cell" role="cell" data-label="Top-k 来源"><span class="sheet-src sheet-src--topk"><b>← 24</b><small>沿用</small></span></div>
+            <div class="sheet-source-action" role="cell" data-label="本层做什么"><p>本层不重算评分；直接沿用层 24 的 Top-k。</p></div>
+          </div>
+        </div>
+        <p class="sheet-table-note"><b>读法：</b>Top-k 栏的 <b>24</b> 是“结果在本层产生”，不是又读了一份 24 的 Top-k 张量；候选集仍来自 20。层 26 的 <b>← 24</b> 才是直接沿用上一处结果。</p>
+      </figure>
+
+      <div class="sheet-layers-detail">
+        <section class="sheet-candidate-panel" aria-labelledby="candidate-title">
+          <p class="sheet-note__label">候选路径 / CANDIDATES</p>
+          <h3 id="candidate-title">Top-k 的候选只走一条路</h3>
+          <div class="sheet-candidate-flow" role="img" aria-label="候选流程：层 20 对全部合法位置评分并产出候选集；层 24 只在候选内重新评分并产出 Top-k；层 26 不重算评分，沿用层 24 的 Top-k。">
+            <div class="sheet-flow-node">
+              <span>L20</span>
+              <b>全部合法位置</b>
+              <small>全位置评分 → 候选集</small>
+            </div>
+            <div class="sheet-flow-node is-candidate">
+              <span>候选集</span>
+              <b>来自 L20</b>
+              <small>传递的是位置集合</small>
+            </div>
+            <div class="sheet-flow-node is-focus">
+              <span>L24</span>
+              <b>仅候选内重评</b>
+              <small>在本层产出 Top-k</small>
+            </div>
+            <div class="sheet-flow-node">
+              <span>L26</span>
+              <b>不重算评分</b>
+              <small>沿用 L24 的 Top-k</small>
+            </div>
+          </div>
+          <p class="sheet-candidate-panel__note">示意图，不代表实际候选数量或 k 值；只表达“谁产生、谁重评、谁沿用”。</p>
+        </section>
+
+        <aside class="sheet-kinds-panel" aria-labelledby="kinds-title">
+          <p class="sheet-note__label">两种共享 / TWO KINDS</p>
+          <h3 id="kinds-title">不要合成一个“跨层缓存”</h3>
+          <div class="sheet-kind sheet-kind--idx">
+            <span>index-K 共享</span>
+            <b>读同一份键表示</b>
+            <p>后续层读取已经存在的 index-K；共享的是已有数据。</p>
+          </div>
+          <div class="sheet-kind sheet-kind--topk">
+            <span>Top-k 共享</span>
+            <b>沿用候选 / 选择结果</b>
+            <p>后续层沿用位置集合或选择结果；不是同一份键张量。</p>
+          </div>
+          <p class="sheet-kinds-panel__note">层 24 是分界：KV / index-K 仍指向 20；Top-k 在本层产生。层 26 才直接沿用 24 的 Top-k。</p>
+        </aside>
+      </div>
+
+      <footer class="sheet-plate__foot">
+        <div class="sheet-sources">
+          <p class="sheet-sources__label">源码锚点 / 固定 <code>5537415</code></p>
+          <div class="sheet-sources__grid">
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">HF · 模型 config</span>
+              <p class="sheet-anchor__file">config.json:106–127</p>
+              <p>HF 模型 revision <code>1bae0e108899…</code>；固定版本，不指向可漂移的 main。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">Python · HF config</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/hugging_face/config.py#L68-L74" target="_blank" rel="noopener noreferrer">config.py:68–74 <span aria-hidden="true">↗</span></a></p>
+              <p>层数与 hidden 等模型配置字段。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">Python · 跨层</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/models/v4_modules/cross_layer.py#L277" target="_blank" rel="noopener noreferrer">cross_layer.py:277 起 <span aria-hidden="true">↗</span></a></p>
+              <p>跨层来源与复用的实现入口。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">Python · Attention</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/models/v4_modules/attn.py#L553-L570" target="_blank" rel="noopener noreferrer">attn.py:553–570 <span aria-hidden="true">↗</span></a></p>
+              <p>KV / index-K / Top-k 在 attention 里的使用点。</p>
+            </div>
+          </div>
+        </div>
+        <a class="sheet-next-link" href="model.html">
+          <span class="sheet-next-link__label">下一章 / NEXT</span>
+          <strong>模型与层间</strong>
+          <small>43 层配置、跨层读取与 YOCO 实现</small>
+          <span class="sheet-next-link__arrow" aria-hidden="true">→</span>
+        </a>
+      </footer>
+    </div>
+  </section>
+
+  <section class="sheet-plate sheet-plate--yoco" id="yoco" aria-labelledby="yoco-title">
+    <div class="wrap">
+      <header class="sheet-plate__head">
+        <div class="sheet-plate__no" aria-hidden="true">03</div>
+        <div class="sheet-plate__intro">
+          <p class="eyebrow"><span class="eyebrow__rule"></span>YOCO / 同一坐标 · 三种模式</p>
+          <h2 id="yoco-title">同一排 token，<br>off / mask / compact 各看见谁？</h2>
+          <p class="sheet-plate__lede">把 query 行和 key 列钉在同一张 12×12 坐标纸上。三种模式只改两件事：为哪些 query 位置生成行，以及可见窗口的下界从哪里开始。</p>
+        </div>
+        <dl class="sheet-plate__facts">
+          <div><dt>位置数</dt><dd>L = 12</dd></div>
+          <div><dt>窗口</dt><dd>W = 4</dd></div>
+          <div><dt>下界起点</dt><dd>start = 4</dd></div>
+          <div><dt>本图画法</dt><dd>只讲完整 12 位置算例</dd></div>
+        </dl>
+      </header>
+
+      <figure class="sheet-figure sheet-figure--yoco">
+        <figcaption class="sheet-figure__head">
+          <div>
+            <span class="sheet-figure__tag">图 3A</span>
+            <h3>三张 12×12 矩阵，只画 SWA 可见域</h3>
+          </div>
+          <p>行 = query q；列 = SWA key k。默认阅读不需要操作。</p>
+        </figcaption>
+
+        <div class="sheet-yoco-params">
+          <div><span>L</span><b>12</b><small>位置</small></div>
+          <div><span>W</span><b>4</b><small>窗口</small></div>
+          <div><span>keep</span><b>8</b><small>原参数</small></div>
+          <div><span>起点</span><b>4</b><small>start</small></div>
+          <div class="is-wide"><span>consumer</span><b>20..39</b><small>原算例参数</small></div>
+        </div>
+        <p class="sheet-params-note">原始算例参数一并保留：L=12 · W=4 · keep=8 · 起点=4 · consumer=20..39。本图只展开 <b>L / W / 起点</b> 对 SWA 可见域的影响；keep 与 consumer 不另作推断。</p>
+
+        <div class="sheet-read-guide">
+          <span class="sheet-read-guide__title">怎么读</span>
+          <p><b>q</b> 行 = 要计算的 query 位置；<b>k</b> 列 = 它在 SWA 可见域中能看到的 key 位置。青格可见，空白被遮，<b>∅</b> 表示行存在但在 SWA 可见域内没有可见 key，斜线表示本模式不生成该 query 行。</p>
+          <p><b>珊瑚竖线</b> = k4 的 start 下界；三种模式共用同一列坐标，方便直接比较。<b>范围</b>：三张矩阵只画 SWA 可见域；主 KV 的稀疏读取未画在此矩阵中。</p>
+        </div>
+
+        <div class="sheet-mode-grid">
+          <article class="sheet-mode sheet-mode--off" aria-labelledby="mode-off-title">
+            <header class="sheet-mode__head">
+              <div>
+                <p class="sheet-mode__tag">模式 A · SWA 因果窗口</p>
+                <h3 id="mode-off-title">OFF</h3>
+              </div>
+              <div class="sheet-mode__count"><b>12</b><span>query 行</span></div>
+            </header>
+            <p class="sheet-mode__desc">12 个位置都生成 query。列 k 是 SWA key；窗口从序列头起算，W=4；pos 4 看到 key 1–4，pos 8 看到 key 5–8。</p>
+            <div class="sheet-matrix" role="img" aria-label="OFF 模式 SWA 可见域：12 个 query 行。行 0 到 3 从序列头开始；行 4 可见 key 1 到 4；行 8 可见 key 5 到 8；行 11 可见 key 8 到 11。">
+  <div class="sheet-matrix__head" aria-hidden="true">
+    <span class="sheet-corner">q\k</span>
+    <span class="sheet-colnum">0</span>
+    <span class="sheet-colnum">1</span>
+    <span class="sheet-colnum">2</span>
+    <span class="sheet-colnum">3</span>
+    <span class="sheet-colnum is-startcol">4</span>
+    <span class="sheet-colnum">5</span>
+    <span class="sheet-colnum">6</span>
+    <span class="sheet-colnum">7</span>
+    <span class="sheet-colnum">8</span>
+    <span class="sheet-colnum">9</span>
+    <span class="sheet-colnum">10</span>
+    <span class="sheet-colnum">11</span>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>0</b></span>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>1</b></span>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>2</b></span>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>3</b></span>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-pin" aria-hidden="true">
+    <span class="sheet-qlabel"><b>4</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>5</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>6</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>7</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-pin" aria-hidden="true">
+    <span class="sheet-qlabel"><b>8</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>9</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>10</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>11</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+  </div>
+</div>
+            <div class="sheet-mode__pins">
+              <span><b>pos 4</b><code>[1,5)</code></span>
+              <span><b>pos 8</b><code>[5,9)</code></span>
+            </div>
+            <p class="sheet-mode__note">12 行都参与；这是对照基线。</p>
+          </article>
+
+          <article class="sheet-mode sheet-mode--mask" aria-labelledby="mode-mask-title">
+            <header class="sheet-mode__head">
+              <div>
+                <p class="sheet-mode__tag">模式 B · SWA 下界截到 4</p>
+                <h3 id="mode-mask-title">MASK</h3>
+              </div>
+              <div class="sheet-mode__count"><b>12</b><span>query 行</span></div>
+            </header>
+            <p class="sheet-mode__desc">仍生成 12 个 query，但 SWA 可见下界截到 4。pos 0–3 在 SWA 中为空窗口；pos 4 只剩 key 4。</p>
+            <div class="sheet-matrix" role="img" aria-label="MASK 模式 SWA 可见域：仍为 12 个 query 行。行 0 到 3 在 SWA 可见域内为空窗口；行 4 只可见 key 4；行 8 可见 key 5 到 8；行 11 可见 key 8 到 11。">
+  <div class="sheet-matrix__head" aria-hidden="true">
+    <span class="sheet-corner">q\k</span>
+    <span class="sheet-colnum">0</span>
+    <span class="sheet-colnum">1</span>
+    <span class="sheet-colnum">2</span>
+    <span class="sheet-colnum">3</span>
+    <span class="sheet-colnum is-startcol">4</span>
+    <span class="sheet-colnum">5</span>
+    <span class="sheet-colnum">6</span>
+    <span class="sheet-colnum">7</span>
+    <span class="sheet-colnum">8</span>
+    <span class="sheet-colnum">9</span>
+    <span class="sheet-colnum">10</span>
+    <span class="sheet-colnum">11</span>
+  </div>
+  <div class="sheet-matrix__row is-empty" aria-hidden="true">
+    <span class="sheet-qlabel"><b>0</b><small>∅</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-empty" aria-hidden="true">
+    <span class="sheet-qlabel"><b>1</b><small>∅</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-empty" aria-hidden="true">
+    <span class="sheet-qlabel"><b>2</b><small>∅</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-empty" aria-hidden="true">
+    <span class="sheet-qlabel"><b>3</b><small>∅</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-pin" aria-hidden="true">
+    <span class="sheet-qlabel"><b>4</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>5</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>6</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>7</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-pin" aria-hidden="true">
+    <span class="sheet-qlabel"><b>8</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>9</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>10</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>11</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+  </div>
+</div>
+            <div class="sheet-mode__pins">
+              <span><b>pos 4</b><code>[4,5)</code></span>
+              <span><b>pos 8</b><code>[5,9)</code></span>
+            </div>
+            <p class="sheet-mode__note">行数不变；变的是 SWA 可见域，早期行可以是 ∅。</p>
+          </article>
+
+          <article class="sheet-mode sheet-mode--compact" aria-labelledby="mode-compact-title">
+            <header class="sheet-mode__head">
+              <div>
+                <p class="sheet-mode__tag">模式 C · SWA 只生成 4–11</p>
+                <h3 id="mode-compact-title">COMPACT</h3>
+              </div>
+              <div class="sheet-mode__count"><b>8</b><span>query 行</span></div>
+            </header>
+            <p class="sheet-mode__desc">只为 pos 4–11 生成 8 行 query；SWA 可见域与 mask 相同。</p>
+            <div class="sheet-matrix" role="img" aria-label="COMPACT 模式 SWA 可见域：只为 query 行 4 到 11 生成计算。行 0 到 3 不生成；行 4 只可见 key 4；行 8 可见 key 5 到 8；行 11 可见 key 8 到 11。完整 KV 和 index-K 路径仍保存 key 0 到 11。">
+  <div class="sheet-matrix__head" aria-hidden="true">
+    <span class="sheet-corner">q\k</span>
+    <span class="sheet-colnum">0</span>
+    <span class="sheet-colnum">1</span>
+    <span class="sheet-colnum">2</span>
+    <span class="sheet-colnum">3</span>
+    <span class="sheet-colnum is-startcol">4</span>
+    <span class="sheet-colnum">5</span>
+    <span class="sheet-colnum">6</span>
+    <span class="sheet-colnum">7</span>
+    <span class="sheet-colnum">8</span>
+    <span class="sheet-colnum">9</span>
+    <span class="sheet-colnum">10</span>
+    <span class="sheet-colnum">11</span>
+  </div>
+  <div class="sheet-matrix__row is-absent" aria-hidden="true">
+    <span class="sheet-qlabel"><b>0</b><small>—</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-absent" aria-hidden="true">
+    <span class="sheet-qlabel"><b>1</b><small>—</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-absent" aria-hidden="true">
+    <span class="sheet-qlabel"><b>2</b><small>—</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-absent" aria-hidden="true">
+    <span class="sheet-qlabel"><b>3</b><small>—</small></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-pin" aria-hidden="true">
+    <span class="sheet-qlabel"><b>4</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>5</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>6</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>7</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row is-pin" aria-hidden="true">
+    <span class="sheet-qlabel"><b>8</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>9</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>10</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell"></i>
+  </div>
+  <div class="sheet-matrix__row" aria-hidden="true">
+    <span class="sheet-qlabel"><b>11</b></span>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-startcol"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+    <i class="sheet-cell is-on"></i>
+  </div>
+</div>
+            <div class="sheet-mode__pins">
+              <span><b>pos 4</b><code>[4,5)</code></span>
+              <span><b>pos 8</b><code>[5,9)</code></span>
+            </div>
+            <p class="sheet-mode__note">只有 query 行减少；KV / index-K 存储另画。</p>
+          </article>
+        </div>
+
+        <div class="sheet-yoco-summary">
+          <div><span>pos 4</span><p>OFF <code>[1,5)</code> · MASK <code>[4,5)</code> · COMPACT <code>[4,5)</code></p></div>
+          <div><span>pos 8</span><p>三种都是 <code>[5,9)</code></p></div>
+          <div><span>query 行</span><p>只有 COMPACT 从 12 减到 8</p></div>
+        </div>
+        <p class="sheet-yoco-conclusion">MASK 与 COMPACT 的 SWA 可见域相同；两种截断模式相对 OFF 都可能出现数值差异。只有 COMPACT 减少 query 行。</p>
+      </figure>
+
+      <div class="sheet-storage">
+        <div class="sheet-storage__copy">
+          <p class="sheet-note__label">COMPACT / 只减 query 维</p>
+          <h3>query 行少了，KV / index-K 存储没少。</h3>
+          <p>把同一组 key 0–11 横着排。COMPACT 的 query 行从 4 开始，但 full KV / index-K 路径仍然保存 0–11；不要把它读成删掉前缀 KV。</p>
+        </div>
+        <div class="sheet-storage__tracks">
+          <div class="sheet-storage__row">
+            <span class="sheet-storage__label">COMPACT query 行</span>
+            <div class="sheet-storage__track" role="img" aria-label="COMPACT 只为 query 位置 4 到 11 生成 8 行，0 到 3 不生成。">
+              <span class="is-absent">0</span><span class="is-absent">1</span><span class="is-absent">2</span><span class="is-absent">3</span><span class="is-on">4</span><span class="is-on">5</span><span class="is-on">6</span><span class="is-on">7</span><span class="is-on">8</span><span class="is-on">9</span><span class="is-on">10</span><span class="is-on">11</span>
+            </div>
+          </div>
+          <div class="sheet-storage__row">
+            <span class="sheet-storage__label">full KV / index-K 存储</span>
+            <div class="sheet-storage__track sheet-storage__track--cache" role="img" aria-label="完整 KV 和 index-K 路径仍然保存 key 位置 0 到 11 的全部 12 个位置。">
+              <span class="is-on">0</span><span class="is-on">1</span><span class="is-on">2</span><span class="is-on">3</span><span class="is-on">4</span><span class="is-on">5</span><span class="is-on">6</span><span class="is-on">7</span><span class="is-on">8</span><span class="is-on">9</span><span class="is-on">10</span><span class="is-on">11</span>
+            </div>
+          </div>
+          <p class="sheet-storage__note">0–3 在 query 轨上标为“不生成”；在 KV / index-K 轨上仍然存在。两条轨的 12 个位置按同一列对齐。</p>
+        </div>
+      </div>
+
+      <div class="sheet-caveats">
+        <div class="sheet-caveat"><b>与 OFF 可能不同</b><p>MASK 与 COMPACT 共用同一 SWA 可见域；比较对象是这两种截断模式与 OFF：窗口下界不同的位置，attention 数值可能与 OFF 不同。这里不承诺任意 GPU 执行逐 bit 一致。</p></div>
+        <div class="sheet-caveat"><b>少行 ≠ 高 MFU</b><p>少算 query 行不自动等于 MFU 上升；本页没有 GPU 实测。</p></div>
+        <div class="sheet-caveat"><b>只讲完整 12 位置</b><p>源码里早期 chunk 仍有 placeholder 行；不要把 8 行形状推广到所有 chunk。</p></div>
+      </div>
+
+      <footer class="sheet-plate__foot">
+        <div class="sheet-sources">
+          <p class="sheet-sources__label">源码锚点 / 固定 <code>5537415</code></p>
+          <div class="sheet-sources__grid">
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">Python · YOCO 输入</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/input_metadata/yoco.py#L3-L6" target="_blank" rel="noopener noreferrer">yoco.py:3–6 <span aria-hidden="true">↗</span></a><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/input_metadata/yoco.py#L86-L115" target="_blank" rel="noopener noreferrer">86–115 <span aria-hidden="true">↗</span></a></p>
+              <p>模式参数与 query / KV 组织。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">C++ · prepare input</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp#L149-L167" target="_blank" rel="noopener noreferrer">prepare_tensor_input_v4.cpp:149–167 <span aria-hidden="true">↗</span></a></p>
+              <p>query 行与可见下界的准备。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">Python · Attention</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/models/v4_modules/attn.py#L672" target="_blank" rel="noopener noreferrer">attn.py:672 <span aria-hidden="true">↗</span></a><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/models/v4_modules/attn.py#L769" target="_blank" rel="noopener noreferrer">769 <span aria-hidden="true">↗</span></a></p>
+              <p>attention 中两种路径的读取点。</p>
+            </div>
+            <div class="sheet-anchor">
+              <span class="sheet-anchor__tag">官方 Q&amp;A · 部署</span>
+              <p class="sheet-anchor__link"><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L183" target="_blank" rel="noopener noreferrer">inference_deployment_qa.md:183 <span aria-hidden="true">↗</span></a></p>
+              <p>部署语境下的说明；不是性能实测。</p>
+            </div>
+          </div>
+        </div>
+        <a class="sheet-next-link" href="performance.html">
+          <span class="sheet-next-link__label">下一章 / NEXT</span>
+          <strong>性能与效率</strong>
+          <small>少算 query 行为什么不自动等于更高 MFU</small>
+          <span class="sheet-next-link__arrow" aria-hidden="true">→</span>
+        </a>
+      </footer>
+    </div>
+  </section>
+
+  <section class="sheet-next" aria-labelledby="next-title">
+    <div class="wrap">
+      <p class="eyebrow eyebrow--light"><span class="eyebrow__rule"></span>继续读 / NEXT CHAPTERS</p>
+      <h2 id="next-title">三张图看完，<br>接着读三章正文。</h2>
+      <div class="sheet-next__grid">
+        <a class="sheet-next-card" href="runtime.html">
+          <span class="sheet-next-card__no">01</span>
+          <strong>运行时与异步</strong>
+          <p>KV 生命周期、block / state 池、加载计划与同步点。</p>
+          <span class="sheet-next-card__arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="sheet-next-card" href="model.html">
+          <span class="sheet-next-card__no">02</span>
+          <strong>模型与层间</strong>
+          <p>43 层配置、跨层读取、YOCO 的输入组织与 attention 路径。</p>
+          <span class="sheet-next-card__arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="sheet-next-card" href="performance.html">
+          <span class="sheet-next-card__no">03</span>
+          <strong>性能与效率</strong>
+          <p>少算 query 行、窗口与 MFU 的边界；本页不提供 GPU 实测。</p>
+          <span class="sheet-next-card__arrow" aria-hidden="true">→</span>
+        </a>
+      </div>
+      <p class="sheet-next__foot"><a href="index.html">回首页重走整机剖面</a><span aria-hidden="true">↗</span></p>
+    </div>
+  </section>
+
+  <section class="sheet-boundary" id="sources" aria-labelledby="sources-title">
+    <div class="wrap">
+      <p class="eyebrow"><span class="eyebrow__rule"></span>证据边界 / EVIDENCE</p>
+      <h2 id="sources-title">逻辑剖面，不是字节 ABI，<br>也不是性能实测。</h2>
+      <div class="sheet-boundary__grid">
+        <div class="sheet-boundary__item">
+          <span>源码坐标</span>
+          <h3>固定 SHA，不跟 main 漂移</h3>
+          <p>GitHub 链接固定到 <code>553741557a57df44a46fb3ab72b6aafeaf945337</code>；HF 模型 config 固定到 revision <code>1bae0e1088993b9b82de08f59de5be5a34e42170</code>。行号是本次分析的定位。</p>
+        </div>
+        <div class="sheet-boundary__item">
+          <span>教学示意</span>
+          <h3>形状是读图算例，不是 tensor 清单</h3>
+          <p>block_size=4、12 位置窗口、候选集合的点 / 框，都是为看懂关系而固定的小算例；不代表实际 tensor 形状、真实候选 k 或字节布局。</p>
+        </div>
+        <div class="sheet-boundary__item">
+          <span>性能边界</span>
+          <h3>没有 GPU 数字，就不写 MFU</h3>
+          <p>本次没有 GPU 运行数据，不展示虚构 MFU、吞吐或加速比例。“少 query 行”只是一条机制事实，不自动推出 MFU 上升。</p>
+        </div>
+      </div>
+      <div class="sheet-boundary__links">
+        <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 <span aria-hidden="true">↗</span></a>
+        <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">上游 LICENSE · Apache-2.0 <span aria-hidden="true">↗</span></a>
+        <span>分析日期 2026-10-26 · 无 GPU 实测</span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap site-footer__in">
+    <div>
+      <a class="brand brand--footer" href="index.html">
+        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/><path class="brand__cut" d="M5 19h30M18 8v24"/></svg>
+        <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+      </a>
+      <p>中文、面向初学者、可回到固定源码行号的 DeepInfer 教学站。</p>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+      <a href="index.html#glossary">术语</a>
+      <a href="index.html#resources">资料下载</a>
+      <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 ↗</a>
+    </div>
+    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · HF <code>1bae0e1</code> · 分析日期 2026-10-26 · 逻辑示意 / 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
+  </div>
+</footer>
+</body>
+</html>

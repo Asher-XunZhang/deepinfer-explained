@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="zh-CN" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>运行时账本：KV、生命周期、ZOS 与 Graph | DeepInfer 剖面</title>
+  <meta name="description" content="DeepInfer 运行时机制导读：逻辑块如何经页表落到物理 KV、SWA state 为什么独立、结束与回池为何不同步、ZOS 怎样跨步 remap 并保留事件依赖、CUDA Graph 为什么按 query 行数选档。固定 SHA，含可操作页表、生命周期、CPU/GPU 过程图与 Graph 算例。">
+  <meta name="color-scheme" content="light">
+  <meta property="og:title" content="运行时账本 | DeepInfer 剖面">
+  <meta property="og:description" content="缓存有地址，执行有时间。把 KV 账本、请求寿命和异步依赖分开看。">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/navigation.css">
+  <link rel="stylesheet" href="assets/runtime-motion.css">
+  <script>document.documentElement.classList.remove('no-js');document.documentElement.classList.add('js');</script>
+  <script src="assets/runtime.js" defer></script>
+</head>
+<body class="unit-page">
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="version-bar">
+  <div class="wrap version-bar__in">
+    <span>固定源码 <code>5537415</code></span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>分析日期 2026-10-26</span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>静态源码阅读，无 GPU 实测</span>
+    <a href="index.html#boundary">证据边界</a>
+  </div>
+</div>
+
+<header class="site-header">
+  <div class="wrap site-header__in">
+    <a class="brand" href="index.html" aria-label="DeepInfer 剖面首页">
+      <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
+        <path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/>
+        <path class="brand__cut" d="M5 19h30M18 8v24"/>
+      </svg>
+      <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+    </a>
+    <nav class="primary-nav" aria-label="全站导航">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html" aria-current="page">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+    </nav>
+    <span class="header-status"><i aria-hidden="true"></i>章节 02</span>
+  </div>
+</header>
+
+<div class="unit-ribbon">
+  <div class="wrap unit-ribbon__in">
+    <span class="unit-ribbon__label">MECHANICS / 02</span>
+    <nav aria-label="本单元机制">
+      <a href="#kv">页表与 KV</a>
+      <a href="#life">生命周期</a>
+      <a href="#zos">ZOS 异步</a>
+      <a href="#graph">CUDA Graph</a>
+    </nav>
+    <span class="unit-ribbon__note">资源账本 · 请求寿命 · 事件依赖 · 图档</span>
+  </div>
+</div>
+
+<main id="main">
+  <section class="unit-hero" aria-labelledby="unit-title">
+    <div class="wrap">
+      <p class="eyebrow"><span class="eyebrow__rule"></span>机制深读 · 运行时账本 / KV, LIFECYCLE &amp; ASYNC</p>
+      <div class="unit-hero__grid">
+        <div>
+          <h1 id="unit-title">缓存有地址，<br><span>执行有时间。</span></h1>
+          <p class="unit-hero__lede">KV 的物理块可以离散，请求的寿命也不会在“生成结束”那一刻清零。本单元只追两条线：CPU 账本怎样把逻辑 token 位置翻译成 GPU 上的 block/offset；CPU 与 GPU 又怎样在跨步重叠时，靠 remap 和 event 保留真实依赖。CUDA Graph 只是这条链上的另一种执行方式。</p>
+          <dl class="unit-hero__facts" aria-label="本单元阅读信息">
+            <div><dt>机制</dt><dd>KV / 生命周期 / ZOS / Graph</dd></div>
+            <div><dt>可操作图</dt><dd>页表、三盏灯、双泳道、图档</dd></div>
+            <div><dt>数字口径</dt><dd>教学算例，不是 runtime trace</dd></div>
+          </dl>
+        </div>
+        <aside class="unit-map" aria-labelledby="unit-map-title">
+          <div class="unit-map__head"><span id="unit-map-title">本单元地图</span><span>点击直达</span></div>
+          <ol>
+            <li><a href="#kv"><span class="num">01</span><span><strong>逻辑位置怎样落到物理块</strong><small>页表、页内偏移、独立 SWA state</small></span><span class="unit-map__state">可查地址</span></a></li>
+            <li><a href="#life"><span class="num">02</span><span><strong>结束为什么先于回池</strong><small>终态、收尾、引用计数与对象池释放</small></span><span class="unit-map__state">4 步</span></a></li>
+            <li><a href="#zos"><span class="num">03</span><span><strong>CPU 与 GPU 重叠了什么</strong><small>跨步 remap、sample event 与 D2H（仅 varlen）</small></span><span class="unit-map__state">可回看</span></a></li>
+            <li><a href="#graph"><span class="num">04</span><span><strong>图档为什么随 query 增长</strong><small>total_q、bisect 选档与 padding 行</small></span><span class="unit-map__state">实时重算</span></a></li>
+          </ol>
+          <p class="unit-map__foot">每个算例都是缩小模型。源码事实另附固定行号；页面不展示虚构的 MFU、吞吐或加速比例。</p>
+        </aside>
+      </div>
+      <div class="unit-contract">
+        <span>读完之后，你应该能回答</span>
+        <ul>
+          <li>token position 5 怎样走到物理 block 2 的 offset 1</li>
+          <li>为什么 block_table 为空或 state 未分配，不能叫“地址相同”</li>
+          <li>FINISHED_ABORTED 之后，KV 与 state 为什么还可能被占着</li>
+          <li>ZOS 流水没有删除哪一条依赖；Graph 的 8 行为什么不是 8 个请求</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <noscript>
+    <div class="wrap">
+      <p class="unit-noscript"><strong>JavaScript 已关闭。</strong>正文、源码短摘录、固定行号链接和每个算例的无 JavaScript 分步回退都可阅读。页表查看、生命周期和 ZOS 连续回放、Graph 滑块的交互控件会被隐藏。</p>
+    </div>
+  </noscript>
+
+  <section class="mech mech-first" id="kv" aria-labelledby="kv-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M04</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">约 6 分钟 · 一次地址翻译</span></div>
+          <h2 id="kv-title">逻辑块先查表，物理块才落到显存</h2>
+          <p class="mech-thesis">请求只持有连续的 <strong>逻辑</strong> token 历史；真正存 KV 的物理块可以不连续。CPU 侧的 block manager 管编号和引用，GPU 侧的 <code>gpu_blocks</code> 才存字节。把这两层混成一个数组，就会误读分页；把 <code>gpu_states</code> 当成 KV 块，也会误判准入。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>逻辑侧</dt><dd>token position → 逻辑页 + 页内偏移</dd></div>
+          <div><dt>映射侧</dt><dd>block_table[i] → 物理 block id</dd></div>
+          <div><dt>资源侧</dt><dd>gpu_blocks 与 gpu_states 分开计</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>历史连续增长，但显存没有足够大的连续块；每请求还要独立的 SWA/compression state。</dd></div>
+        <div><dt>谁决定</dt><dd>CPU 的 <code>Blocks</code> 用 free list、pin 与 <code>ref_count</code> 分配；block 0 保留。</dd></div>
+        <div><dt>状态怎么变</dt><dd>Sequence 的 <code>block_table</code> 记录物理编号；<code>num_tokens</code> 与 <code>state_id</code> 分别跟踪历史和状态槽。</dd></div>
+        <div><dt>代价视角</dt><dd>分页降低连续大块压力，却增加页表、元数据和尾块空洞；它不是把 KV 变成免费的容量。</dd></div>
+      </dl>
+
+      <figure class="lab" data-lab="addr" aria-labelledby="lab-addr-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互算例 · block_size=4，数字是教学账本</span>
+            <h3 id="lab-addr-title">一个 token 位置，要过几道门？</h3>
+          </div>
+          <span class="lab-count" data-addr-count>A · 位置 05</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params js-only">
+            <span class="param-label">请求</span>
+            <div class="seg" role="group" aria-label="选择请求页表">
+              <button type="button" data-addr-req="A" aria-pressed="true">A · 10 tokens</button>
+              <button type="button" data-addr-req="B" aria-pressed="false">B · 8 tokens</button>
+            </div>
+            <label class="param-label" for="addr-pos">查看 token 位置</label>
+            <input class="pos-slider" id="addr-pos" type="range" min="0" max="9" value="5" step="1" data-addr-pos aria-describedby="addr-pos-note">
+            <output class="kv" data-addr-pos-out for="addr-pos">5</output>
+            <span class="lab-note" id="addr-pos-note">位置从 0 开始；它不是 token ID。</span>
+          </div>
+          <div class="addr-wrap">
+            <div>
+              <div class="addr-pages" data-addr-pages aria-label="逻辑页与物理块映射"></div>
+              <div class="addr-formula" aria-label="地址分解过程">
+                <div class="addr-term">
+                  <span>逻辑页索引</span>
+                  <strong data-addr-page>1</strong>
+                  <small data-addr-page-eq>⌊5 / 4⌋ = 1</small>
+                </div>
+                <div class="addr-term">
+                  <span>页表项 → 物理块</span>
+                  <strong data-addr-block>2</strong>
+                  <small data-addr-block-eq>block_table[1] = 2</small>
+                </div>
+                <div class="addr-term">
+                  <span>页内偏移</span>
+                  <strong data-addr-offset>1</strong>
+                  <small data-addr-offset-eq>5 % 4 = 1</small>
+                </div>
+              </div>
+              <div class="phys-pool">
+                <div class="pool-card__head">
+                  <p class="addr-side__k" style="margin:0">PHYSICAL BLOCK POOL / GPU · 教学映射</p>
+                  <span data-addr-pool-count>2 块属于 A</span>
+                </div>
+                <div class="phys-grid" data-addr-pool aria-label="物理 block 池"></div>
+                <p class="lab-note">0 号 block 保留不用。高亮的是同一请求在池中的物理块，不是连续编号。</p>
+              </div>
+            </div>
+            <aside class="addr-side" aria-label="CPU 账本与 GPU 状态池">
+              <p class="addr-side__k">CPU LEDGER / 账本</p>
+              <div class="field-row"><span>request</span><span data-addr-field="req">A</span></div>
+              <div class="field-row"><span>block_table</span><span data-addr-field="table">[7, 2, 9]</span></div>
+              <div class="field-row"><span>num_tokens</span><span data-addr-field="tokens">10</span></div>
+              <div class="field-row"><span>state_id</span><span data-addr-field="state">0</span></div>
+              <div class="field-row"><span>当前物理</span><span data-addr-field="phys">block 2 + offset 1</span></div>
+              <div class="field-row"><span>尾块空洞</span><span data-addr-field="waste">2 个槽</span></div>
+              <p class="addr-side__k" style="margin-top:9px">GPU STATE POOL / 独立</p>
+              <div class="state-slots" data-addr-states aria-label="SWA 或压缩状态槽"></div>
+              <p class="lab-note">state 由每请求的 <code>state_id</code> 指向，不放进 block_table。真实 V4.1 的块内布局还含层、压缩比例、量化数据与 scale；这里只画到 block 和 offset，不虚构每 token 字节数。</p>
+            </aside>
+          </div>
+        </div>
+        <div class="lab-state">
+          <span class="tag tag--sim">教学账本</span>
+          <p data-addr-live aria-live="polite">A 的 token 5：5 / 4 得逻辑页 1，查 block_table[1] 得物理块 2，页内偏移 1；GPU 张量位置是 block 2 的第 1 个槽。</p>
+        </div>
+        <div class="lab-controls js-only">
+          <button type="button" class="control" data-addr-prev>上一个位置</button>
+          <button type="button" class="control" data-addr-next>下一个位置</button>
+          <button type="button" class="control control--reset" data-addr-reset>重置为 A · 位置 5</button>
+        </div>
+        <p class="lab-foot">移动位置或切换 A/B 会立即重算页表、公式和资源状态。图中物理块编号与 state 槽是为了讲清映射，不是运行时 dump。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 分步回退</h4>
+          <p>A 的 block_table 是 <code>[7, 2, 9]</code>，共 10 个历史 token：前两页各 4 个槽，尾页只有 2 个已用槽。查 token 位置 5：</p>
+          <table>
+            <thead><tr><th>步骤</th><th>计算</th><th>结果</th></tr></thead>
+            <tbody>
+              <tr><td>逻辑页</td><td>⌊5 / 4⌋</td><td>1</td></tr>
+              <tr><td>物理块</td><td>block_table[1]</td><td>2</td></tr>
+              <tr><td>页内偏移</td><td>5 % 4</td><td>1</td></tr>
+              <tr><td>GPU 定位</td><td>gpu_blocks 中的 block 2，再按 CacheEngine 布局取偏移</td><td>block 2 + offset 1</td></tr>
+            </tbody>
+          </table>
+          <p>同一算例中 B 用不同页表 <code>[4, 8]</code>，占 8 个 token。A/B 的 KV 页在物理池中不连续，A 单独占 state 1，B 占 state 2；state 0 保留，state 池和 block 池是两套账本。</p>
+        </div>
+      </figure>
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="block_load_plan.cpp 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/input_metadata/block_load_plan.cpp</span></div>
+              <span class="src-function">append_paged_range()</span>
+            </div>
+            <div class="source-window__meta"><span>L23–34</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/input_metadata/block_load_plan.cpp#L23-L34" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+<pre><code>void BlockLoadPlanBuilder::append_paged_range(const std::vector&lt;int&gt; &amp;block_table, int32_t token_begin, int32_t token_end) {
+    TORCH_CHECK_GE(token_begin, 0);
+    TORCH_CHECK_GE(token_end, token_begin);
+    TORCH_CHECK_LE(token_end, static_cast&lt;int64_t&gt;(block_table.size()) * source_block_size_);
+    while (token_begin &lt; token_end) {
+        const int32_t block_index = token_begin / source_block_size_;
+        const int32_t src_block_id = block_table[block_index];
+        const int32_t src_begin = token_begin % source_block_size_;
+        const int32_t segment_len = std::min(token_end - token_begin, source_block_size_ - src_begin);
+        append_segment(src_block_id, src_begin, src_begin + segment_len);
+        token_begin += segment_len;
+    }</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 三道运算</p>
+          <ul class="line-notes">
+            <li><b>L28</b><span><strong>除法选逻辑页。</strong><code>token_begin / source_block_size_</code>，不是 token ID。</span></li>
+            <li><b>L29</b><span><strong>页表给物理编号。</strong><code>block_table[block_index]</code> 才是 <code>src_block_id</code>。</span></li>
+            <li><b>L30–31</b><span><strong>取页内范围。</strong>余数定位起点，<code>segment_len</code> 处理跨页边界。</span></li>
+            <li><b>L32</b><span><strong>按块拼段。</strong>逻辑连续的一段可以拆成多个不连续物理段。</span></li>
+          </ul>
+          <p class="source-bridge"><b>CPU 账本 → GPU 字节：</b>block_table、num_tokens 与 state_id 是账本；CacheEngine 的 <code>gpu_blocks</code>、<code>gpu_states</code> 是设备张量。block 编号只是索引，真正字节还要经过层视图、stride 与真实布局。本图只证明映射关系，不声称 4 token 等于固定字节数。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div>
+          <details class="question">
+            <summary>想一想：block_table 里没有某个物理块，是否等于该块没被这个请求读到？</summary>
+            <div class="question__body"><p>要同时看当前 Sequence 的 <code>cache.block_table</code>、<code>num_tokens</code>、在途 token 和 draft 需求。需求块数由这些量共同决定；只盯着已提交长度会少算，只盯着空表会把“尚未分配”误当“没有地址”。</p></div>
+          </details>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">边界 / 不把分页当免费容量</p>
+          <p class="source-bridge"><b>性能只作解释：</b>分页和共享能让有限缓存承接更多并发，但更多 KV 不会自动增加算力；state 容量也可能先卡住准入。验证应看实际可并发请求、block/state 使用率、预占余量与抢占，而不是把 cache usage 高等同于 MFU 高。</p>
+          <p class="source-attrib">block 0 保留、<code>OK/LATER/NEVER</code> 与独立 state manager 的源码坐标见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/block_manager.hpp#L82-L102" target="_blank" rel="noopener noreferrer">block_manager.hpp:82–102</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/block_manager.hpp#L128-L135" target="_blank" rel="noopener noreferrer">L128–135</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cache_engine.py#L937-L965" target="_blank" rel="noopener noreferrer">cache_engine.py:937–965</a>。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="life" aria-labelledby="life-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M05</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">约 5 分钟 · 连续回放 · 4 个阶段</span></div>
+          <h2 id="life-title">生成可以结束，资源不必同秒回池</h2>
+          <p class="mech-thesis">停止生成先改请求状态；KV block、SWA state 与 MTP slot 要等调度清理、收尾和引用归零。上一 step 的 metadata/RequestOutput 由对象池延迟释放；只有显式 fork/clone 才会额外 pin block/state。因此“已经结束”不等于“马上可分配”。这三件事要分开看：<strong>终态、收尾、引用归零</strong>。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>正常停止</dt><dd>EOS / 长度上限 / max_tokens</dd></div>
+          <div><dt>取消</dt><dd>abort_sequence 先标 FINISHED_ABORTED</dd></div>
+          <div><dt>归还</dt><dd>free_seq → ref_count 到 0</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>旧轮后处理还要读对象池里的 metadata/输出；显式 fork/clone 又会额外 pin 共享 block/state。过早复用会破坏已产生或待返回的结果。</dd></div>
+        <div><dt>谁决定</dt><dd>调度器在 <code>pre_sampler_sync</code> 先 release 对象池/clone，再对 finished 请求 <code>finalize_seq → free_seq</code>；block manager 只按 <code>ref_count</code> 归还。</dd></div>
+        <div><dt>状态怎么变</dt><dd>RUNNING → FINISHED_* → pre_sampler_sync（release 对象池/clone unpin）→ finalize/free_seq → ref 归零后可再分配。</dd></div>
+        <div><dt>代价视角</dt><dd>延迟的对象池与共享引用会暂占资源；过早释放可能读到被覆盖的 KV。正确性不能被空闲率换走。</dd></div>
+      </dl>
+
+      <figure class="lab lab--motion" data-lab="life" aria-labelledby="lab-life-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">连续回放 · 三盏灯、资源所有权与对象池分开看</span>
+            <h3 id="lab-life-title">结束之后，谁还没放手？</h3>
+          </div>
+          <span class="lab-count" data-count>01 / 04</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params js-only">
+            <label class="check-row"><input type="checkbox" data-life-fork checked> 显式 fork：A′ 共享 b9，并给 state 1 记录 clone 源 pin</label>
+            <span class="lab-note">关掉它只看普通独占资源：ref=1，free_seq 后直接归零；不会凭空多出第二份引用。</span>
+          </div>
+          <div class="motion-bar js-only" role="group" aria-label="生命周期连续回放控制">
+            <button type="button" class="control control--play" data-play aria-pressed="false">播放</button>
+            <label class="motion-scrub" for="life-scrub">教学进度
+              <input id="life-scrub" type="range" min="0" max="1000" step="1" value="0" data-scrub aria-describedby="life-motion-note">
+              <output data-motion-pct>0%</output>
+            </label>
+            <span class="motion-phase" data-motion-phase>运行中</span>
+          </div>
+          <p class="motion-note js-only" id="life-motion-note" data-motion-note hidden>系统偏好减少动态效果：已停在静态起点，可用进度条或阶段按钮查看；不会自动播放。</p>
+          <div class="life-flow" data-life-flow>
+            <div class="flow-now">
+              <span class="flow-now__tag" data-life-phase>01 · 运行中</span>
+              <strong data-life-action>A 正在生成；b7/b2 各 1 份引用，显式 fork 的 A′ 让 b9 与 state 1 暂时各多一份 pin。</strong>
+              <code data-life-src>scheduler.hpp · sequence.hpp</code>
+            </div>
+            <div class="life-track" aria-hidden="true">
+              <div class="life-track__line"><i data-life-fill></i><b data-life-actor>R0</b></div>
+              <div class="life-track__marks"><span>RUNNING</span><span>abort</span><span>pre_sampler_sync</span><span>可再分配</span></div>
+            </div>
+            <div class="life-wrap">
+              <div>
+                <div class="life-gates" aria-label="资源生命周期三个门">
+                  <div class="life-gate">
+                    <div class="life-gate__top"><i class="light" data-life-light="end" aria-hidden="true"></i><span>GATE 01 / 生成</span></div>
+                    <strong data-life-gate="end">仍未结束</strong>
+                    <p>EOS、长度上限或 abort 先改终态。</p>
+                  </div>
+                  <div class="life-gate">
+                    <div class="life-gate__top"><i class="light" data-life-light="finish" aria-hidden="true"></i><span>GATE 02 / 收尾</span></div>
+                    <strong data-life-gate="finish">未收尾</strong>
+                    <p><code>pre_sampler_sync</code> 先 release 对象池/clone，再 finalize。</p>
+                  </div>
+                  <div class="life-gate">
+                    <div class="life-gate__top"><i class="light" data-life-light="free" aria-hidden="true"></i><span>GATE 03 / 回池</span></div>
+                    <strong data-life-gate="free">引用未归零</strong>
+                    <p>A 的引用归零，不等于 A′ 那份也归还。</p>
+                  </div>
+                </div>
+                <div class="life-seq">
+                  <div class="life-seq__head"><strong data-life-status>Sequence · RUNNING</strong><span class="badge badge--wait" data-life-badge>占用中</span></div>
+                  <div class="ref-list" data-life-refs aria-label="资源引用与对象池"></div>
+                  <div class="life-callout" data-life-callout><b>还没有结束。</b>abort 只改终态；free_seq 尚未调用，引用也没有变化。</div>
+                </div>
+              </div>
+              <aside class="inspector" aria-label="生命周期账本">
+                <p class="inspector__title">LIFECYCLE / 教学账本</p>
+                <div class="field-row"><span>终态原因</span><span data-life-field="reason">—</span></div>
+                <div class="field-row"><span>free_seq</span><span data-life-field="free">尚未调用</span></div>
+                <div class="field-row"><span>对象池释放</span><span data-life-field="deferred">待下一轮</span></div>
+                <div class="field-row"><span>clone event</span><span data-life-field="clone">已记录，未同步</span></div>
+                <div class="field-row"><span>b7 / b2 / b9</span><span data-life-field="refs">1 / 1 / 2</span></div>
+                <div class="field-row"><span>state 1</span><span data-life-field="state">ref 2</span></div>
+                <p class="addr-warning" data-life-note>state 0 保留；对象池释放不是 KV/state 引用。b9 的第二份引用来自显式 fork 的 A′。</p>
+              </aside>
+            </div>
+            <div class="life-log" data-life-log aria-label="生命周期事件记录"></div>
+          </div>
+        </div>
+        <div class="lab-state">
+          <span class="tag tag--sim" data-life-tag>运行中</span>
+          <p data-life-live aria-live="polite">第 1 步：R0 正在生成；abort 尚未发生，引用账本还没有变化。</p>
+        </div>
+        <div class="lab-steps js-only" data-steps></div>
+        <div class="lab-controls js-only">
+          <button type="button" class="control" data-prev>上一阶段</button>
+          <button type="button" class="control" data-next>下一阶段</button>
+          <button type="button" class="control control--reset" data-reset>重置回放</button>
+        </div>
+        <p class="lab-foot">拖动进度条可停在任意中间状态；播放、暂停、继续与重置都重绘同一套引用账本。教学进度不是真实耗时；引用数不是运行时 dump。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 回退：把三条所有权线拆开</h4>
+          <ol>
+            <li><strong>普通独占：</strong>A 的 b7、b2、state 1 各 1 份引用。abort 只把 R0 标成 <code>FINISHED_ABORTED</code>，不释放资源；本 step 的 <code>pre_sampler_sync</code> 先做 <code>deferred_release.release()</code>（回对象池、同步 clone event），之后才 <code>finalize_seq → free_seq</code>，把 A 的 1 份引用减到 0。</li>
+            <li><strong>显式 fork 的共享块：</strong>A′ 通过 fork 共享完整历史块 b9，并由 <code>block_manager-&gt;pin_blocks</code> 显式加一份引用。b9 的 2→1→0 来自 A 的 free_seq 和 A′ 自己的收尾；不是 metadata 对象自动给所有块加引用。</li>
+            <li><strong>state clone：</strong>clone 下发后记录 <code>clone_done_evt</code>；本 step 的 <code>pre_sampler_sync</code> 先同步该 event，再 <code>unpin</code> 源 state。算例里 state 1 的 2→1 是归还 clone 源 pin；A 自己那份在 free_seq 时 1→0。</li>
+            <li><strong>metadata / RequestOutput：</strong>它们是对象池借用，<code>DeferredRelease.release()</code> 只把它们还给 <code>sequence_metadata_pool</code> / <code>request_output_pool</code>，不改 block/state 的 <code>ref_count</code>。上一 step 的对象在本轮 <code>pre_sampler_sync</code> 回池，本轮对象下一轮才回池。</li>
+          </ol>
+          <p>state 0 保留，教学里 A 用 state 1、B 用 state 2。若关掉 fork 开关，b9 和 state 1 只有 A 的 1 份引用，<code>free_seq</code> 后直接归零；没有第二次释放，也没有 clone event。普通对象引用不等于 BlockManager 的 <code>ref_count</code>。</p>
+        </div>
+      </figure>
+
+      <div class="source-explain">
+        <div>
+          <p class="source-read__label">源码坐标 / 从终态到引用归零</p>
+          <ul class="line-notes">
+            <li><b>L1035</b><span><strong>正常停止条件。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L1035-L1051" target="_blank" rel="noopener noreferrer">scheduler.hpp:1035–1051</a> 的 <code>_check_stop</code> 覆盖 EOS、总长度与 <code>max_tokens</code>。</span></li>
+            <li><b>L144</b><span><strong>取消先标终态。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L144-L162" target="_blank" rel="noopener noreferrer">scheduler.hpp:144–162</a> 的 <code>abort_sequence</code> 不在这里立刻释放 KV。</span></li>
+            <li><b>L752</b><span><strong>收尾链。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L752-L762" target="_blank" rel="noopener noreferrer">scheduler.hpp:752–762</a> 与 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/llm_engine.py#L830-L846" target="_blank" rel="noopener noreferrer">llm_engine.py:830–846</a> 串起 <code>finalize_seq</code> 与 <code>free_seq</code>。</span></li>
+            <li><b>L738</b><span><strong>归还资源。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L738-L749" target="_blank" rel="noopener noreferrer">scheduler.hpp:738–749</a> 归还 MTP slot、state block 与 KV blocks。</span></li>
+            <li><b>L95</b><span><strong>引用计数。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/block_manager.hpp#L95-L102" target="_blank" rel="noopener noreferrer">block_manager.hpp:95–102</a> 的 free 是减引用，只有到 0 才重新可分配。</span></li>
+            <li><b>L67</b><span><strong>延迟回收。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/llm_engine.py#L67-L116" target="_blank" rel="noopener noreferrer">llm_engine.py:67–116</a> 的 <code>DeferredRelease</code> 把 metadata 与输出留到下一轮 <code>pre_sampler_sync</code>；clone 的 block/state unpin 前要同步 clone event。</span></li>
+          </ul>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 不能用一个布尔值压缩</p>
+          <p class="source-bridge"><b>为什么三盏灯必须分开：</b>第一盏是请求语义，第二盏是执行收尾，第三盏是内存所有权。只把第一盏点亮，会让“已结束”的请求继续占着 state 和块；只把第三盏当成第一盏，又会在旧轮还没消费结果时提前覆盖数据。</p>
+          <p class="source-bridge"><b>输出引用也是资源：</b><code>step()</code> 返回的 RequestOutput 由 pool 管理；跨 step 保留要 clone，离线入口在队列空时 flush 在途轮。把池中借用对象直接交给外部调用者，是把生命周期问题推迟成偶发数据损坏。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；本页不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div>
+          <details class="question">
+            <summary>想一想：取消后看到 free list 没增长，能断言资源泄漏吗？</summary>
+            <div class="question__body"><p>不能。取消调用可能只改终态；后续 decode 调度才清理 finished，收尾链还要跑。引用计数仍大于 0 有两类来源：请求尚未推进到安全 <code>free_seq</code>、原有引用还没归还；fork/clone 源的显式 pin 或共享 Sequence 的块引用还没归还。普通 metadata / RequestOutput 是对象池借用，本身不给 BlockManager 加 ref。要看收尾是否推进、降低的是哪个引用、event 是否完成，再谈泄漏。这份分析没有做运行时泄漏测试。</p></div>
+          </details>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">边界 / 回池快慢是两面</p>
+          <p class="source-bridge"><b>性能只作解释：</b>及时而有顺序的复用能减轻重复分配与同步，但延迟释放会暂时占资源，过早释放会破坏正确性。可验证的方向是 event/引用关系、资源峰值与完成后的池余额，而不是用一张“空闲率更高”的图证明更快。</p>
+          <p class="source-attrib">终态枚举见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/sequence.hpp#L30-L61" target="_blank" rel="noopener noreferrer">sequence.hpp:30–61</a>；Python abort 的多模态 pool handle 处理另见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/llm_engine.py#L651-L655" target="_blank" rel="noopener noreferrer">llm_engine.py:651–655</a>。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="zos" aria-labelledby="zos-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M06</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">约 7 分钟 · 连续回放 · 5 个位置</span></div>
+          <h2 id="zos-title">CPU 可以不等，依赖不能消失</h2>
+          <p class="mech-thesis">ZOS 的“zero-overhead”是名称，不是已测开销为零。它先用 <code>_correct_seqlens_qk</code> 按 <code>seq_id</code> 构造跨步 remap、把 H2D/修正排进 current stream，再把 <code>MetadataZOS</code> 交给当前 forward；CPU 才能在等待上一轮 event 的同时推进当前下发。重叠的是控制与部分后处理，<strong>不是 token 的因果依赖</strong>。旧轮的 sample event 仍要被等待。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>顺序</dt><dd>remap/修正 → forward(current) → post_process(prev)</dd></div>
+          <div><dt>对账</dt><dd>旧 batch 与新 batch 按 seq_id remap</dd></div>
+          <div><dt>依赖</dt><dd>sample event、D2H（仅 varlen）、stream 顺序</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>CPU 等待上一轮结果会产生下发空隙；但下一轮输入又确实依赖上一轮采样。</dd></div>
+        <div><dt>谁决定</dt><dd><code>Worker.execute_model_step</code> 先构造 remap/修正再下发 forward；prefill 或关闭 ZOS 时走当轮处理。</dd></div>
+        <div><dt>状态怎么变</dt><dd>ZOS decode 把上一轮保存进 <code>prev_step_state</code>；当前轮先用它的 seq_id 构造 remap，再把当前轮保存给下一轮。</dd></div>
+        <div><dt>代价视角</dt><dd>跨轮状态、在途资源与修正更复杂；若瓶颈是模型算子或通信，隐藏 CPU 时间不等于缩短全部。</dd></div>
+      </dl>
+
+      <figure class="lab lab--motion" data-lab="zos" aria-labelledby="lab-zos-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">连续回放 · 同一 step 窗口；条件可切换</span>
+            <h3 id="lab-zos-title">两轮之间，CPU 和 GPU 各在等什么？</h3>
+          </div>
+          <span class="lab-count" data-count>01 / 05</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params js-only">
+            <label class="check-row"><input type="checkbox" data-zos-on checked> ZOS decode 流水开启</label>
+            <label class="check-row"><input type="checkbox" data-zos-varlen checked> MTP varlen 修正（d2h_evt 可能非 None）</label>
+          </div>
+          <p class="lab-note js-only">教学条件：decode，且上一 step 与本 step 有交集，B/A 为 matched、C 为 fresh。若 <code>has_overlap=false</code>，<code>_correct_seqlens_qk</code> 返回 None，本图 remap 不执行。</p>
+          <div class="motion-bar js-only" role="group" aria-label="ZOS 连续回放控制">
+            <button type="button" class="control control--play" data-play aria-pressed="false">播放</button>
+            <label class="motion-scrub" for="zos-scrub">教学进度
+              <input id="zos-scrub" type="range" min="0" max="1000" step="1" value="0" data-scrub aria-describedby="zos-motion-note">
+              <output data-motion-pct>0%</output>
+            </label>
+            <span class="motion-phase" data-motion-phase>对账 / 下发修正</span>
+          </div>
+          <p class="motion-note js-only" id="zos-motion-note" data-motion-note hidden>系统偏好减少动态效果：已停在静态起点，可用进度条或阶段按钮查看；不会自动播放。</p>
+          <div class="zos-flow" data-zos-flow>
+            <div class="flow-now">
+              <span class="flow-now__tag" data-zos-mode>ZOS decode · overlap</span>
+              <strong data-zos-action>先按 seq_id 构造 remap 并下发 H2D/修正；current forward 要等这些输入准备好。</strong>
+              <code data-zos-src>_correct_seqlens_qk · worker.py:209–216</code>
+            </div>
+            <div class="zos-relay" data-zos-relay>
+              <div class="relay-side relay-side--prev" data-zos-prev-card>
+                <span class="relay-k">上一 step GPU 输出 · prev_step_state</span>
+                <div class="relay-tokens">
+                  <span class="relay-slot" data-zos-src="A"><i>A</i><small>slot 0</small></span>
+                  <span class="relay-slot" data-zos-src="B"><i>B</i><small>slot 1</small></span>
+                </div>
+              </div>
+              <div class="relay-arrow" aria-hidden="true">seq_id<br>→</div>
+              <div class="relay-side relay-side--cur">
+                <span class="relay-k">本轮输入 · [B, C, A]</span>
+                <div class="relay-tokens">
+                  <span class="relay-slot" data-zos-dst="B"><i>B</i><small>matched</small></span>
+                  <span class="relay-slot is-fresh" data-zos-dst="C"><i>C</i><small>fresh</small></span>
+                  <span class="relay-slot" data-zos-dst="A"><i>A</i><small>matched</small></span>
+                </div>
+              </div>
+              <div class="relay-side relay-side--cpu">
+                <span class="relay-k">CPU 新输入</span>
+                <span class="relay-slot is-fresh" data-zos-src="C"><i>C</i><small>fresh</small></span>
+              </div>
+              <div class="relay-ghosts" data-zos-ghosts aria-hidden="true">
+                <span class="relay-ghost" data-zos-ghost="A">A</span>
+                <span class="relay-ghost" data-zos-ghost="B">B</span>
+                <span class="relay-ghost" data-zos-ghost="C">C</span>
+              </div>
+            </div>
+            <p class="zos-off-note" data-zos-off-note hidden><b>non-ZOS：</b>跨轮输入图不适用，整张旧 GPU 来源图已隐藏。<code>prev_step_state=None</code>，当前请求的输入由已更新的 CPU 状态准备，不使用上一轮 GPU 输出。</p>
+            <div class="zos-vtl" data-zos-timeline>
+              <div class="zos-vtl__head"><span>CPU</span><span>GPU</span><span>EVENT</span></div>
+              <div class="zos-vtl__body">
+                <div class="zos-vtl__lane" data-zos-lane="cpu" aria-label="CPU 动作"></div>
+                <div class="zos-vtl__lane" data-zos-lane="gpu" aria-label="GPU 动作"></div>
+                <div class="zos-vtl__lane" data-zos-lane="event" aria-label="事件依赖"></div>
+                <i class="zos-vtl__playhead" data-zos-playhead aria-hidden="true"></i>
+              </div>
+            </div>
+            <div class="zos-event-strip" aria-label="事件状态">
+              <span class="evt-chip" data-zos-event="prev">prev.sample_end_evt · 等待</span>
+              <span class="evt-chip" data-zos-event="current">current.sample_end_evt · 未记录</span>
+            </div>
+            <div class="zos-grid">
+              <div>
+                <p class="zos-desc" data-zos-desc>先修正 remap，再让 current forward 进入 stream；CPU 随后同步 prev 事件，GPU 执行顺序由同一 stream 保证。</p>
+                <div class="zos-callout" data-zos-callout><b>先修正，后 forward。</b>CPU 可以先提交当前 GPU 工作，但 current forward 读取的 remap 必须已经按 seq_id 准备好；prev event 仍是同一 stream 上的前置。</div>
+              </div>
+              <aside>
+                <div class="inspector" aria-label="ZOS 跨步状态">
+                  <p class="inspector__title">ZOS / 跨步账本</p>
+                  <div class="field-row"><span>prev_step_state</span><span data-zos-field="prev">已保存</span></div>
+                  <div class="field-row"><span>fresh rows</span><span data-zos-field="fresh">C ← CPU</span></div>
+                  <div class="field-row"><span>matched rows</span><span data-zos-field="match">B←1 / A←0</span></div>
+                  <div class="field-row"><span>等待 / 记录</span><span data-zos-field="event">prev evt（等待）</span></div>
+                  <div class="field-row"><span>D2H</span><span data-zos-field="d2h">仅 varlen</span></div>
+                  <div class="field-row"><span>CPU 账本</span><span data-zos-field="ledger">滞后一轮</span></div>
+                </div>
+                <div class="remap-panel" data-zos-remap>
+                  <div class="remap-panel__head"><span>按 seq_id 对账</span><span>旧 [A,B] → 新 [B,C,A]</span></div>
+                  <div data-zos-remap-rows>
+                    <div class="remap-row"><span class="from">B</span><span class="remap-arrow">←</span><span>上轮 slot 1 · GPU 输出</span></div>
+                    <div class="remap-row"><span class="fresh">C</span><span class="remap-arrow">←</span><span>fresh · CPU 新输入</span></div>
+                    <div class="remap-row"><span class="from">A</span><span class="remap-arrow">←</span><span>上轮 slot 0 · GPU 输出</span></div>
+                  </div>
+                  <p class="remap-note" data-zos-remap-note hidden>prev_step_state=None：稳定 non-ZOS 路径不构造跨轮 remap，也不使用旧 GPU 行。</p>
+                </div>
+              </aside>
+            </div>
+          </div>
+        </div>
+        <div class="lab-state">
+          <span class="tag tag--sim">教学时序</span>
+          <p data-zos-live aria-live="polite">第 1 步：CPU 按 seq_id 建 remap 并下发修正；current forward 尚未执行。</p>
+        </div>
+        <div class="lab-steps js-only" data-steps></div>
+        <div class="lab-controls js-only">
+          <button type="button" class="control" data-prev>上一阶段</button>
+          <button type="button" class="control" data-next>下一阶段</button>
+          <button type="button" class="control control--reset" data-reset>重置回放</button>
+        </div>
+        <p class="lab-foot">播放/暂停/继续/重置都重绘同一条过程；暂停会停在当前进度。条形高度只表示先后和重叠，不是毫秒、trace 或实测耗时。关闭 ZOS 时切换的是另一条稳定路径，不会保留旧的跨轮 GPU 行。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 回退：ZOS 开与关是两条路径</h4>
+          <p><strong>ZOS 开启（本算例有 overlap）：</strong></p>
+          <ol>
+            <li><strong>先对账：</strong><code>_correct_seqlens_qk</code> 按 <code>seq_id</code> 得 B←1、C←fresh、A←0；H2D 与 GPU 修正在 current stream 上排好，随后 <code>MetadataZOS</code> 才交给当前 forward。current forward 不能在这之前执行。</li>
+            <li><strong>再前向：</strong>current forward 依赖 stream 上先排的修正；CPU 同时可以准备 <code>_post_process_step(prev)</code>。</li>
+            <li><strong>事件依赖：</strong>CPU 读上一轮结果前要同步 <code>prev.sample_end_evt</code>；event 未完成时 CPU 等待。设备 event 完成后，同一 stream 上的 current correction/forward 才能执行；CPU 是否已经 synchronize 是另一件事。CPU 还没调用或还没从 synchronize 返回时，GPU 可以已在跑后继工作，但此时 prev event 必须已完成。不能把“event 未完成”和“依赖它的 forward 已执行”同时画出来。</li>
+            <li><strong>修正与采样：</strong>只有在 MTP varlen 开启时才记录 <code>d2h_evt</code>，把 <code>seqlens_q</code> 拷回 CPU，并在更新 sampling metadata 前同步它；同步返回后 <code>update_metadata_for_sampling_zos</code> 才执行，metadata 更新完成后才 <code>execute_sample</code>。accepted 数由 GPU 上的 k 修正使用，不是这次 D2H 的内容。varlen 关闭时 <code>d2h_evt=None</code>，不执行这次同步，但 metadata 完成 → sample 下发的顺序仍在。CPU <code>pre_sampler_sync</code> 可以与已经下发的 GPU sample 重叠。</li>
+            <li><strong>收口：</strong><code>execute_sample</code> 下发后，<code>pre_sampler_sync</code> 先 <code>deferred_release.release()</code>，再 finalize finished；随后 <code>sample_end_evt.record()</code> 只是记录，不等于完成。当前轮保存为下一轮的 <code>prev_step_state</code>；下一轮 CPU 先按 <code>seq_id</code> 构造 remap（只比较 <code>seq_id</code>，不读 GPU 采样 token），把依赖上一轮输出的修正/forward 按 stream 顺序排好；之后才在 <code>_post_process_step(prev)</code> 同步这个 event 并做 CPU 后处理。CPU 建映射不等于 GPU 已经拿到 token。</li>
+          </ol>
+          <p><strong>ZOS 关闭（稳定 non-ZOS）：</strong>forward(current) → sample(current) → <code>pre_sampler_sync</code> → record current <code>sample_end_evt</code> → synchronize current event → post_process(current) → <code>prev=None</code>。没有跨轮 remap，也没有旧 GPU matched rows；<code>seq_id</code> 仍是请求身份，但这条路径不执行 ZOS remap。关闭后没有“下一轮再次等待同一 prev sample event”的路径。</p>
+          <p>教学进度不是耗时；条形不按毫秒缩放。D2H 的开关条件写在正文与回放里，不能把“有 overlap”误当成“必然 D2H”。</p>
+        </div>
+      </figure>
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="worker.py 当前 forward 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/worker/worker.py</span></div>
+              <span class="src-function">Worker.execute_model_step()</span>
+            </div>
+            <div class="source-window__meta"><span>L120–127</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L120-L127" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+<pre><code>        metadata_zos = correction.metadata_zos if correction is not None else None
+        if not is_placeholder:
+            main_model_output = self.model_runner.execute_main_model(
+                seq_metadata_list, self.gpu_cache, metadata_zos=metadata_zos, total_q=total_q
+            )
+        else:
+            seq_metadata_list = [self.model_runner._placeholder_seq_metadata(is_prompt)]
+            main_model_output = self.model_runner.execute_main_model(seq_metadata_list, self.gpu_cache, metadata_zos=metadata_zos)</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+          <article class="source-window" aria-label="worker.py 后处理上一轮源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/worker/worker.py</span></div>
+              <span class="src-function">execute_model_step() · 后续</span>
+            </div>
+            <div class="source-window__meta"><span>L143–152</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L143-L152" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+<pre><code>        # 2. post process prev step
+        request_outputs = self._post_process_step(self.prev_step_state)
+
+        # 3. sample curr step（先用 d2h 回来的 seqlens_q 修正 CPU 侧元数据）
+        if correction is not None:
+            if correction.d2h_evt is not None:
+                correction.d2h_evt.synchronize()
+            scheduler_outputs.update_metadata_for_sampling_zos(
+                seq_metadata_list, correction.seqlens_q_cpu, correction.metadata_zos.remap_cpu, self.nextn
+            )</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 重叠仍靠事件收口</p>
+          <ul class="line-notes">
+            <li><b>120–127</b><span><strong>forward 拿到 MetadataZOS。</strong>它建立在先执行的 <code>_correct_seqlens_qk</code> 上；placeholder 路径也进主模型。</span></li>
+            <li><b>143–145</b><span><strong>回头处理上一轮。</strong><code>_post_process_step(self.prev_step_state)</code> 是跨步状态真正被消费的位置。</span></li>
+            <li><b>146–152</b><span><strong>D2H 有开关。</strong>只有 MTP varlen 开启时 <code>d2h_evt</code> 才非 None；同步返回后才更新 sampling metadata，metadata 完成后才下发 sample。拷回的是 <code>seqlens_q</code>，不是 accepted 数。</span></li>
+          </ul>
+          <p class="source-bridge"><b>记录不等于完成：</b><code>sample_end_evt.record()</code> 只是把事件排进 stream；CPU 要读结果时仍要 <code>synchronize()</code>。下一轮 CPU 可以先用 <code>seq_id</code> 建 remap（不读采样 token），再把依赖上一轮输出的修正/forward 按 stream 排序；同步 event 发生在后处理前，不是 remap 前。当前 forward 也必须排在 remap/修正之后，不能先跑再补输入。</p>
+          <p class="source-bridge"><b>remap 不是列表补丁：</b>当前 batch 的每一行按 <code>seq_id</code> 找上一轮行；新加入的 C 拿 fresh 输入，匹配到的 B/A 拿上一轮设备输出。按当前列表行号盲接，会在重排或插入请求时把 token 写给错误序列。</p>
+          <p class="source-attrib">先修正再 forward、D2H 条件与事件同步：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L191-L245" target="_blank" rel="noopener noreferrer">worker.py:191–245</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L248-L271" target="_blank" rel="noopener noreferrer">worker.py:248–271</a>；<code>prepare_zos_inputs</code> 的 remap 见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/zos.cpp#L142-L195" target="_blank" rel="noopener noreferrer">zos.cpp:142–195</a>；fresh 行规则见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/zos.cpp#L84-L112" target="_blank" rel="noopener noreferrer">zos.cpp:84–112</a>。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div>
+          <details class="question">
+            <summary>想一想：CPU 还没拿到 A 的最后 token，能先拿旧 token 跑下一轮吗？</summary>
+            <div class="question__body"><p>不能跳过依赖。需要按 remap 告诉 GPU 哪一行取上一轮输出、哪一行是新输入，并在必要时修正 q/k 与 varlen 元数据；对重叠请求，上一轮采样、draft、accepted 数都会影响下一轮。旧 token 直接复用会把错误静默带进后续层。</p></div>
+          </details>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">边界 / 不是所有阶段都能被隐藏</p>
+          <p class="source-bridge"><b>性能只作解释：</b>若空隙主要来自 CPU 排班、下发或后处理，重叠有机会隐藏一部分；若瓶颈在模型算子或通信，CPU 不等待也不会让那些阶段变短。验证要固定 workload 比较 ZOS 开关，拆看 launch 间隙、device forward/sample event、正确性与延迟，而不是凭泳道图报加速。</p>
+          <p class="source-attrib">prefill 或关闭 ZOS 时立即 post-process 的顺序，见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L113-L189" target="_blank" rel="noopener noreferrer">worker.py:113–189</a>；下发区禁用 CUDA 同步的边界见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/model_runner.py#L319-L329" target="_blank" rel="noopener noreferrer">model_runner.py:319–329</a>。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="graph" aria-labelledby="graph-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M07</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">约 6 分钟 · 一次图档选择</span></div>
+          <h2 id="graph-title">图档跟 query 行数走，不跟请求数走</h2>
+          <p class="mech-thesis">decode 可以重放预先捕获的执行图，少走重复下发路径；图是固定档位，必须按本轮真实 <code>total_q</code> 行数选。补出来的 placeholder 是执行行，不是有效请求；采样仍要知道真实 <code>num_reqs</code>。把“2 个请求”当成“2 行图”会低估工作量和 padding。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>适用</dt><dd>非 prompt、未强制 eager、已捕获</dd></div>
+          <div><dt>选择</dt><dd>不小于 total_q 的最小档</dd></div>
+          <div><dt>输出</dt><dd>graph_size 行执行，real num_reqs 给 sampler</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>每步重复走 Python/算子下发有控制开销；但 batch 大小与 query 行数都变化，图不能任意长。</dd></div>
+        <div><dt>谁决定</dt><dd><code>build_graph_batch_sizes</code> 预建档位；<code>select(total_q)</code> 用 bisect 选最小足够档。</dd></div>
+        <div><dt>状态怎么变</dt><dd>真实 q 行填入 buffer，剩余补 placeholder；<code>graph.replay()</code> 复用图与内存池。</dd></div>
+        <div><dt>代价视角</dt><dd>减少的部分下发开销换来预热/捕获、常驻显存和 padding 工作；档位越稀，浪费可能越明显。</dd></div>
+      </dl>
+
+      <figure class="lab" data-lab="graph" aria-labelledby="lab-graph-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互算例 · 固定图档 [1, 2, 4, 8]，两个请求</span>
+            <h3 id="lab-graph-title">5 行真实 query，为什么进 8 行图？</h3>
+          </div>
+          <span class="lab-count" data-graph-count>实时重算</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="graph-top">
+            <div class="q-controls js-only">
+              <label class="q-control">A 的 q 行 <input type="range" min="1" max="6" step="1" value="2" data-graph-a> <output data-graph-a-out>2</output></label>
+              <label class="q-control">B 的 q 行 <input type="range" min="1" max="6" step="1" value="3" data-graph-b> <output data-graph-b-out>3</output></label>
+              <button type="button" class="control" data-graph-reset>恢复 A=2, B=3</button>
+            </div>
+            <span class="lab-note">q 行可能含待验证 draft，不全是最终输出 token。</span>
+          </div>
+          <div class="graph-counters" aria-label="请求数、真实 query 行数与图档位">
+            <div class="counter"><span>请求 / requests</span><strong data-graph-req>2</strong><small>两个请求不会自动变成 2 行图档</small></div>
+            <div class="counter is-real"><span>真实 query 行 / total_q</span><strong data-graph-real>5</strong><small>A 2 + B 3；选档只看这个和</small></div>
+            <div class="counter is-bucket"><span>图档位 / graph_size</span><strong data-graph-size>8</strong><small>补 <span data-graph-pad>3</span> 行 placeholder</small></div>
+          </div>
+          <div class="graph-body">
+            <div class="graph-slots">
+              <div class="graph-slots__k"><span>GRAPH BUFFER / 执行行</span><span data-graph-slot-head>8 行 · 3 行 padding</span></div>
+              <div class="q-slot-grid" data-graph-slots aria-label="图执行的 query 行"></div>
+            </div>
+            <div class="tier-scale" aria-label="图档与选择">
+              <div class="tier-scale__k">预捕获档位 · 教学示例</div>
+              <div class="tiers">
+                <div class="tier" data-tier="1"><span>1</span></div>
+                <div class="tier" data-tier="2"><span>2</span></div>
+                <div class="tier" data-tier="4"><span>4</span></div>
+                <div class="tier" data-tier="8"><span>8</span></div>
+              </div>
+              <p class="graph-note" data-graph-formula style="margin-top:22px">bisect_left([1,2,4,8], 5) 选到 8；不是按 2 个请求选 2。</p>
+            </div>
+          </div>
+          <div class="graph-error" data-graph-error hidden></div>
+          <p class="graph-note" data-graph-note>真实请求数仍是 2；sampler 使用另存的 num_reqs。图档 8 只说明这轮执行 8 行，其中 3 行是 placeholder。</p>
+        </div>
+        <div class="lab-state">
+          <span class="tag tag--sim">教学档位</span>
+          <p data-graph-live aria-live="polite">A=2、B=3：total_q=5，选不小于 5 的最小档 8，补 3 行 placeholder；请求数仍为 2。</p>
+        </div>
+        <div class="lab-controls js-only">
+          <button type="button" class="control control--reset" data-graph-reset-bottom>重置 query 行</button>
+        </div>
+        <p class="lab-foot">拖动 A/B 的 q 行会立即重算 total_q、选档、padding 和 buffer。超过 8 行时本教学图档报错；真实档表由源码函数决定，不只这四个。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 分步回退</h4>
+          <p>教学图档取 <code>[1, 2, 4, 8]</code>；每个请求占若干 query 行，图档按两请求的 q 行数之和选择：</p>
+          <table>
+            <thead><tr><th>A q</th><th>B q</th><th>请求数</th><th>total_q</th><th>选档</th><th>padding</th></tr></thead>
+            <tbody>
+              <tr><td>2</td><td>3</td><td>2</td><td>5</td><td>8</td><td>3</td></tr>
+              <tr><td>1</td><td>1</td><td>2</td><td>2</td><td>2</td><td>0</td></tr>
+              <tr><td>4</td><td>4</td><td>2</td><td>8</td><td>8</td><td>0</td></tr>
+              <tr><td>6</td><td>6</td><td>2</td><td>12</td><td>超最大档，报错</td><td>—</td></tr>
+            </tbody>
+          </table>
+          <p>五真实行、八执行行、两请求是三个不同的数。A/B 的 q 可以包含 draft token；不要把 padding 行算成有效模型 token。重放路径仍用真实 <code>num_reqs</code> 对齐 sampler。</p>
+        </div>
+      </figure>
+
+      <div class="source-explain">
+        <div>
+          <p class="source-read__label">源码坐标 / 档位与真实行数</p>
+          <ul class="line-notes">
+            <li><b>L41</b><span><strong>档表怎么建。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cuda_graph_runner.py#L41-L51" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py:41–51</a> 的 <code>build_graph_batch_sizes</code> 包含 2 次幂小档与固定间隔档；本页的 [1,2,4,8] 只是教学例子。</span></li>
+            <li><b>L143</b><span><strong>选择规则。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cuda_graph_runner.py#L143-L148" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py:143–148</a> 的 <code>select(total_q)</code> 通过 bisect 找不小于实际 q 的最小档，超过最大档报错。</span></li>
+            <li><b>L184</b><span><strong>补 placeholder。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/model_runner.py#L184-L191" target="_blank" rel="noopener noreferrer">model_runner.py:184–191</a> 把真实行填入，再用 placeholder 补足 <code>graph_size - total_q</code>；<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/model_runner.py#L164-L168" target="_blank" rel="noopener noreferrer">L164–168</a> 只设置真实 <code>num_reqs</code>。</span></li>
+            <li><b>L326</b><span><strong>重放调用。</strong><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/model_runner.py#L326-L327" target="_blank" rel="noopener noreferrer">model_runner.py:326–327</a> 调用 <code>cuda_graph_runner.replay()</code>；真正的 <code>graph.replay()</code> 在 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cuda_graph_runner.py#L150-L154" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py:150–154</a>。</span></li>
+          </ul>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 三个 batch 概念</p>
+          <p class="source-bridge"><b>请求数 ≠ query 行数 ≠ 图档位。</b>两个请求可以有 5 行 q；5 行真实工作要进 8 行图；8 行图里有 3 行是 placeholder。把 <code>graph_size</code> 当请求数，会错配 sampler；把 padding 算成有效 token，会高估有效吞吐。</p>
+          <p class="source-bridge"><b>为什么只对 decode：</b>主模型 graph 的条件是非 prompt、未强制 eager、已捕获，PROMPT 引擎不启用这条 runner。capture 还要预热、持有 buffer 与 graph memory pool；重放省的是重复下发路径，不是模型计算本身。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；本页不展示完整上游文件，也不展示运行时 GC 数据。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div>
+          <details class="question">
+            <summary>想一想：请求数从 1 变成 2，图档就该翻倍吗？</summary>
+            <div class="question__body"><p>不一定。选档只看本轮真实 q 行数之和；两个请求可能各 1 行，一个请求也可能带多个 draft 行或 varlen q。要先算 <code>total_q</code>，再找最小足够档。请求数只影响 sampler 的 <code>num_reqs</code> 和输入组织，不直接等于图档。</p></div>
+          </details>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">边界 / 图不是自动加速开关</p>
+          <p class="source-bridge"><b>性能只作解释：</b>graph 可能减少 launch/CPU 控制开销，但增加预热/捕获时间、常驻内存与 padding 工作。档位稀、batch 很小或主耗时在大算子/通信时，收益可能被抵消。比较 graph 与 eager 必须使用相同输入与配置，拆开 warmup 和稳态，并保留正确性结果。</p>
+          <p class="source-attrib">适用条件见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/model_runner.py#L72-L79" target="_blank" rel="noopener noreferrer">model_runner.py:72–79</a>；capture 与内存池见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cuda_graph_runner.py#L82-L141" target="_blank" rel="noopener noreferrer">cuda_graph_runner.py:82–141</a>。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <nav class="unit-turn" aria-label="单元导航">
+    <div class="wrap unit-turn__in">
+      <a href="scheduling.html">
+        <small>上一单元</small>
+        <span><strong>请求与调度</strong><span class="micro-note" style="display:block">请求如何被批准，KV 紧了谁让路</span></span>
+      </a>
+      <div class="unit-turn__mid"><span>02 / 05</span><i aria-hidden="true"></i><span>运行时与异步</span></div>
+      <a class="unit-turn__next" href="model.html">
+        <small>NEXT / 03</small>
+        <span><strong>模型与注意力</strong><span class="micro-note" style="display:block">40 层主干、共享 KV 与 MoE 并行</span></span>
+      </a>
+    </div>
+  </nav>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap site-footer__in">
+    <div>
+      <a class="brand brand--footer" href="index.html">
+        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/><path class="brand__cut" d="M5 19h30M18 8v24"/></svg>
+        <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+      </a>
+      <p>中文、面向初学者、可回到固定源码行号的 DeepInfer 教学站。</p>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+      <a href="index.html#glossary">术语</a>
+      <a href="index.html#resources">资料下载</a>
+      <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 ↗</a>
+    </div>
+    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-26 · 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
+  </div>
+</footer>
+</body>
+</html>

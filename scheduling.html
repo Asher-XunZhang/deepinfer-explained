@@ -1,0 +1,1423 @@
+<!doctype html>
+<html lang="zh-CN" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>请求与调度：从 tokens 到抢占 | DeepInfer 剖面</title>
+  <meta name="description" content="DeepInfer 请求与调度机制导读：prompt 如何变成 token ID 与 Sequence，chunk prefill 的 4/4/2 与首 token，DP ALL/ANY 两次投票，decode 抢占与重算。固定 SHA，含可步进算例与源码小窗。">
+  <meta name="color-scheme" content="light">
+  <meta property="og:title" content="请求与调度 | DeepInfer 剖面">
+  <meta property="og:description" content="请求不是一次投递，而是一轮轮被批准。步进四个机制，回到固定源码行。">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/navigation.css">
+  <link rel="stylesheet" href="assets/request-motion.css">
+  <script>document.documentElement.classList.remove('no-js');document.documentElement.classList.add('js');</script>
+  <script src="assets/mechanics.js" defer></script>
+  <script src="assets/request-motion.js" defer></script>
+  <link rel="stylesheet" href="assets/scheduling-static.css">
+  <link rel="stylesheet" href="assets/vote-static.css">
+  <link rel="stylesheet" href="assets/preempt-static.css">
+</head>
+<body class="unit-page">
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="version-bar">
+  <div class="wrap version-bar__in">
+    <span>固定源码 <code>5537415</code></span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>分析日期 2026-10-26</span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>静态源码阅读，无 GPU 实测</span>
+    <a href="index.html#boundary">证据边界</a>
+  </div>
+</div>
+
+<header class="site-header">
+  <div class="wrap site-header__in">
+    <a class="brand" href="index.html" aria-label="DeepInfer 剖面首页">
+      <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
+        <path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/>
+        <path class="brand__cut" d="M5 19h30M18 8v24"/>
+      </svg>
+      <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+    </a>
+    <nav class="primary-nav" aria-label="全站导航">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html" aria-current="page">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+    </nav>
+    <span class="header-status"><i aria-hidden="true"></i>章节 01</span>
+  </div>
+</header>
+
+<div class="unit-ribbon">
+  <div class="wrap unit-ribbon__in">
+    <span class="unit-ribbon__label">MECHANICS / 01</span>
+    <nav aria-label="本单元机制">
+      <a href="#req">请求建档</a>
+      <a href="#chunk">4 / 4 / 2</a>
+      <a href="#vote">DP 两次投票</a>
+      <a href="#preempt">抢占方向</a>
+    </nav>
+    <span class="unit-ribbon__note">固定 SHA · 下一单元：运行时与异步</span>
+  </div>
+</div>
+
+<main id="main">
+  <section class="unit-hero" aria-labelledby="unit-title">
+    <div class="wrap">
+      <p class="eyebrow"><span class="eyebrow__rule"></span>机制深读 · 请求与调度 / REQUEST &amp; SCHEDULING</p>
+      <div class="unit-hero__grid">
+        <div>
+          <h1 id="unit-title">请求不是一次投递，<br><span>而是一轮轮被批准。</span></h1>
+          <p class="unit-hero__lede">这一单元只跟四件事走：文本怎样变成 token 和会继续长大的 <code>Sequence</code>；长 prompt 为什么被切成 4/4/2，首个输出 token 究竟在哪一轮出现；多个 Attention DP rank 为什么必须用两次 ALL/ANY 投票统一本轮步型；KV 紧了，谁来让路，重算还是终止。</p>
+          <dl class="unit-hero__facts" aria-label="本单元阅读信息">
+            <div><dt>机制</dt><dd>4 个，各自独立图</dd></div>
+            <div><dt>可步进阶段</dt><dd>请求 / chunk / 投票 / 抢占</dd></div>
+            <div><dt>源码口径</dt><dd>固定 commit + 精确行号</dd></div>
+          </dl>
+        </div>
+        <aside class="unit-map" aria-labelledby="unit-map-title">
+          <div class="unit-map__head"><span id="unit-map-title">本单元地图</span><span>点击直达</span></div>
+          <ol>
+            <li><a href="#req"><span class="num">01</span><span><strong>从文本到 waiting 队列</strong><small>tokenizer、请求身份、Sequence 与入队</small></span><span class="unit-map__state">6 步</span></a></li>
+            <li><a href="#chunk"><span class="num">02</span><span><strong>分块 prefill 与首 token</strong><small>4/4/2 只是这个预算下的切法</small></span><span class="unit-map__state">条件切换</span></a></li>
+            <li><a href="#vote"><span class="num">03</span><span><strong>DP 步型的两次投票</strong><small>ALL / ANY，以及空 prefill 陪跑</small></span><span class="unit-map__state">两会话</span></a></li>
+            <li><a href="#preempt"><span class="num">04</span><span><strong>抢占方向与重算</strong><small>尾端选谁跑，头端请谁让路</small></span><span class="unit-map__state">停止 / 重算</span></a></li>
+          </ol>
+          <p class="unit-map__foot">每张图只讲一个机制。图里的“教学算例”是缩小模型，不是运行时 trace；源码事实另附短摘录。</p>
+        </aside>
+      </div>
+      <div class="unit-contract">
+        <span>读完之后，你应该能回答</span>
+        <ul>
+          <li>token ID 与 token position 为什么不是一回事</li>
+          <li>10 个 prompt token、预算 4，为什么是 4/4/2、首 token 在第三轮</li>
+          <li>ALL/ANY 第一次投票之后，为什么还要第二次</li>
+          <li>代码实际抢占的是长输出还是短输出，重算保留了什么</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <noscript>
+    <div class="wrap">
+      <p class="unit-noscript"><strong>JavaScript 已关闭。</strong>所有机制正文、源码小窗、思考题和每张图下方的“无 JavaScript 分步回退”都可阅读；自动播放、条件开关与滑块会被隐藏。交互算例的数值与结论已在回退文字里列出。</p>
+    </div>
+  </noscript>
+
+  <section class="mech mech-first" id="req" aria-labelledby="req-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M01</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">约 7 分钟 · 6 个状态</span></div>
+          <h2 id="req-title">一段文本，先变成会继续长大的请求档案</h2>
+          <p class="mech-thesis">入口拿到的 prompt 是字符串。模型需要的是整数 token；调度器需要的是一个能保存 token、采样参数、KV 账本和状态的 <strong>Sequence</strong>。这三层不是同一个对象，也不在同一时刻完成。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>决策</dt><dd>LLM 入口编码或复用 token IDs</dd></div>
+          <div><dt>排队</dt><dd>Scheduler.add_sequence → waiting</dd></div>
+          <div><dt>持续成本</dt><dd>每步 schedule / KV 增长 / 输出</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>文本不能直接进模型；采样参数和 KV 账本必须按请求隔离。</dd></div>
+        <div><dt>谁决定</dt><dd><code>_add_request</code> 决定编码还是复用；调度器写入到达时间并入队。</dd></div>
+        <div><dt>状态怎么变</dt><dd>字符串 → int32 token 数组 → Sequence → waiting 队列中的待调度项。</dd></div>
+        <div><dt>代价视角</dt><dd>编码与建档是一次性；此后每一步调度、KV 增长和输出复制才持续发生。</dd></div>
+      </dl>
+
+      <figure class="lab lab--request" data-lab="request" aria-labelledby="lab-req-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互算例 · 教学简化 / 不是实际 tokenizer 输出</span>
+            <h3 id="lab-req-title">同一份 R0，怎样穿过四个模块</h3>
+          </div>
+          <span class="lab-count" data-count aria-label="动画进度">00%</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params js-only">
+            <span class="param-label">输入形态</span>
+            <div class="seg" role="group" aria-label="选择请求输入形态">
+              <button type="button" data-input-kind="text" aria-pressed="true">用户文本</button>
+              <button type="button" data-input-kind="ids" aria-pressed="false">已有 token IDs</button>
+            </div>
+            <span class="lab-note" data-req-kind-note>文本路径：调用 tokenizer.encode。</span>
+          </div>
+
+          <div class="req-player js-only">
+            <div class="req-transport">
+              <div class="req-transport__main">
+                <div class="req-buttons" role="group" aria-label="请求建档播放控制">
+                  <button type="button" class="control control--play req-play" data-play aria-pressed="false">播放</button>
+                  <button type="button" class="control" data-prev>上一步</button>
+                  <button type="button" class="control" data-next>下一步</button>
+                  <button type="button" class="control control--reset" data-reset>重置</button>
+                </div>
+                <div class="req-timebox">
+                  <div class="req-timebox__head">
+                    <label for="req-scrub">时间轴 <span data-req-phase-label>入口</span></label>
+                    <span class="req-scrub__time" data-req-time>0.0s / 12.0s</span>
+                  </div>
+                  <input id="req-scrub" type="range" min="0" max="1000" value="0" step="1" data-req-scrub aria-describedby="req-scrub-note">
+                </div>
+              </div>
+              <div class="req-steps" data-steps aria-label="按阶段跳转"></div>
+              <p class="req-motion-note" data-req-motion-note hidden>系统偏好减少动态效果：当前显示静态总览，不会自动播放。可用时间轴或阶段按钮逐段查看。</p>
+            </div>
+
+            <div class="req-stage" data-req-stage>
+              <div class="req-passport">
+                <span class="req-passport__label">同一请求</span>
+                <strong class="req-passport__id" data-req-id-badge>未分配</strong>
+                <span class="req-passport__meta" data-req-id-meta>string · 还没有 request_id</span>
+                <span class="req-passport__state" data-req-stage-state>入口</span>
+              </div>
+
+              <div class="req-flow" data-req-pipe aria-label="请求经过的四个模块">
+                <div class="req-stop" data-req-node="prompt">
+                  <div class="req-module">
+                    <div class="req-module__head">
+                      <span class="req-module__no">01</span>
+                      <span class="req-module__label" data-req-prompt-label>入口 / STRING</span>
+                      <span class="req-pass" data-req-pass="prompt">待分配</span>
+                    </div>
+                    <div class="req-module__headline">
+                      <strong class="req-module__title" data-req-prompt-title>床前明月光</strong>
+                      <span class="req-stamp" data-req-stamp>
+                        <span>sampling ×1</span>
+                        <b data-req-stamp-id>R0</b>
+                      </span>
+                    </div>
+                    <div class="token-strip req-entry-ids" data-req-entry-ids aria-label="入口已有的 token IDs" hidden></div>
+                    <p class="req-module__note" data-req-prompt-note>用户可读文本；还不是模型输入。</p>
+                  </div>
+                </div>
+
+                <div class="req-link" data-req-link="to-tokens" aria-hidden="true">
+                  <span class="req-link__action" data-req-link-label="to-tokens">分配 R0</span>
+                  <span class="req-link__rail">
+                    <i class="req-link__line"></i>
+                    <span class="req-courier" data-req-courier="to-tokens">
+                      <b data-req-courier-id>R0</b>
+                      <span class="req-courier__meta" data-req-courier-meta>string</span>
+                    </span>
+                    <i class="req-link__arrow" aria-hidden="true"></i>
+                  </span>
+                </div>
+
+                <div class="req-stop" data-req-node="tokens">
+                  <div class="req-module">
+                    <div class="req-module__head">
+                      <span class="req-module__no">02</span>
+                      <span class="req-module__label" data-req-token-label>TOKENIZER / INT32</span>
+                      <span class="req-pass" data-req-pass="tokens">等待</span>
+                    </div>
+                    <div class="token-strip" data-req-tokens aria-label="token ID 序列">
+                      <span class="queue-empty" data-req-tokens-empty>等待编码</span>
+                    </div>
+                    <span class="req-meter" data-req-meter aria-hidden="true"><i data-req-meter-fill></i></span>
+                    <p class="req-module__note" data-req-token-note>词表编号；不是位置。</p>
+                  </div>
+                </div>
+
+                <div class="req-link" data-req-link="to-sequence" aria-hidden="true">
+                  <span class="req-link__action" data-req-link-label="to-sequence">tokenizer → Sequence</span>
+                  <span class="req-link__rail">
+                    <i class="req-link__line"></i>
+                    <span class="req-courier" data-req-courier="to-sequence">
+                      <b data-req-courier-id>R0</b>
+                      <span class="req-courier__meta" data-req-courier-meta>6 ids</span>
+                    </span>
+                    <i class="req-link__arrow" aria-hidden="true"></i>
+                  </span>
+                </div>
+
+                <div class="req-stop" data-req-node="sequence">
+                  <div class="req-module">
+                    <div class="req-module__head">
+                      <span class="req-module__no">03</span>
+                      <span class="req-module__label">SEQUENCE</span>
+                      <span class="req-id-chip" data-req-seq-id>—</span>
+                      <span class="req-pass" data-req-pass="sequence">未建档</span>
+                    </div>
+                    <div class="token-strip token-strip--seq" data-req-seq-tokens aria-label="Sequence 尚未建档">
+                      <span class="queue-empty" data-req-seq-empty>input.tokens 等待写入</span>
+                    </div>
+                    <p class="req-module__fields">
+                      <span>cache <b data-req-field="cache">—</b></span>
+                      <span>block <b data-req-field="table">—</b></span>
+                      <span>state <b data-req-field="state">—</b></span>
+                    </p>
+                    <p class="req-module__note" data-req-seq-note>尚未建档</p>
+                  </div>
+                </div>
+
+                <div class="req-link" data-req-link="to-waiting" aria-hidden="true">
+                  <span class="req-link__action" data-req-link-label="to-waiting">Sequence → waiting</span>
+                  <span class="req-link__rail">
+                    <i class="req-link__line"></i>
+                    <span class="req-courier" data-req-courier="to-waiting">
+                      <b data-req-courier-id>R0</b>
+                      <span class="req-courier__meta" data-req-courier-meta>Seq</span>
+                    </span>
+                    <i class="req-link__arrow" aria-hidden="true"></i>
+                  </span>
+                </div>
+
+                <div class="req-stop" data-req-node="queue">
+                  <div class="req-module">
+                    <div class="req-module__head">
+                      <span class="req-module__no">04</span>
+                      <span class="req-module__label">WAITING / CPU</span>
+                      <span class="req-pass" data-req-pass="queue">空</span>
+                    </div>
+                    <div class="queue-box" data-req-queue>
+                      <span class="queue-box__label">队列</span>
+                      <span class="queue-empty" data-req-queue-empty>空</span>
+                      <span class="req-queue-ticket" data-req-queue-ticket>
+                        <b>R0</b>
+                        <span class="req-queue-tokens" data-req-queue-tokens aria-label="入队 token ID 序列"></span>
+                      </span>
+                    </div>
+                    <p class="req-module__fields">
+                      <span>arrival <b data-req-field="arrival">—</b></span>
+                      <span>reserve <b data-req-field="reserve">—</b></span>
+                    </p>
+                    <p class="req-module__note" data-req-queue-note>尚无 GPU 执行</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <p class="req-scrub__note js-only" id="req-scrub-note">拖动可停在任意中间状态；播放、暂停、回看和重置都重绘同一条时间轴。</p>
+
+          <p class="chunk-note req-note">R0 与同一组 token IDs 会穿过四个模块边界：身份、编码 / 复用、Sequence 和 waiting 都是同一份请求。图中 token IDs 是教学示意，不是当前模型 tokenizer 的真实输出。</p>
+
+          <div class="nojs-fallback nojs-only">
+            <h4>无 JavaScript 分步回退</h4>
+            <ol>
+              <li><strong>入口：</strong>收到 prompt 字符串，或调用方已给的 <code>prompt_token_ids</code>；还没有 request_id。</li>
+              <li><strong>参数与身份：</strong><code>_add_request</code> 先深拷贝 SamplingParams，再从计数器分配 <code>request_id=R0</code>；此时编码尚未开始。</li>
+              <li><strong>编码 / 复用：</strong>文本路径调用 <code>tokenizer.encode(prompt)</code>，再转成 <code>int32</code> 数组；已有 IDs 跳过 encode，只做同样的类型转换。Token ID 是词表编号，不是位置。</li>
+              <li><strong>Sequence：</strong>引擎用同一组 token 创建请求档案，包含 input tokens、sampling、KV/state 账本和状态；初始 <code>cache.num_tokens=0</code>、<code>block_table</code> 空、<code>state_id=-1</code>。</li>
+              <li><strong>入队：</strong><code>Scheduler.add_sequence</code> 写入 arrival_time，预留输出 token 与 block table 容量，把同一个 R0 放入 waiting。此时还没有 GPU forward。</li>
+              <li><strong>step：</strong>之后每次 <code>LLMEngine.step()</code> 只排一轮；一个 step 不等于一整个请求，也不保证一轮只产一个 token。</li>
+            </ol>
+          </div>
+        </div>
+
+        <div class="lab-state">
+          <span class="tag tag--sim" data-state-kind>教学时序</span>
+          <p data-live aria-live="polite" aria-atomic="true">入口：只拿到一段文本。文本不能直接送给模型，也还没有请求 ID。</p>
+        </div>
+
+        <details class="req-dossier js-only">
+          <summary><span>R0 完整档案</span><span class="req-dossier__hint" data-req-dossier-hint>尚未创建</span></summary>
+          <div class="req-dossier__grid">
+            <div class="field-row"><span>request_id</span><span data-req-field="id">—</span></div>
+            <div class="field-row"><span>input.tokens</span><span data-req-field="len">—</span></div>
+            <div class="field-row"><span>sampling</span><span data-req-field="sampling">—</span></div>
+            <div class="field-row"><span>cache.num_tokens</span><span data-req-field="cache">—</span></div>
+            <div class="field-row"><span>block_table</span><span data-req-field="table">—</span></div>
+            <div class="field-row"><span>state_id</span><span data-req-field="state">—</span></div>
+            <div class="field-row"><span>arrival_time</span><span data-req-field="arrival">—</span></div>
+            <div class="field-row"><span>output reserve</span><span data-req-field="reserve">—</span></div>
+            <div class="field-row"><span>schedule.status</span><span data-req-field="status">尚未创建</span></div>
+          </div>
+        </details>
+
+        <p class="lab-foot">教学时序，不是 runtime trace。<b>身份先于编码：</b>先复制 sampling、分配 R0，再编码或复用 token；同一 R0 与 token 组跨过四个模块边界。切换输入形态会暂停并回到开头。</p>
+      </figure>
+
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="llm.py 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/entrypoints/llm.py</span></div>
+              <span class="src-function">LLM._add_request()</span>
+            </div>
+            <div class="source-window__meta"><span>L151–166</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/entrypoints/llm.py#L151-L166" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>sampling_params = copy.deepcopy(sampling_params)
+request_id = str(next(self.request_counter))
+if prompt_token_ids is None:
+    if prompt is None:
+        raise ValueError("prompt and prompt_token_ids cannot both be None")
+    prompt_token_ids = self.llm_engine.tokenizer.encode(prompt)
+prompt_token_ids = np.asarray(prompt_token_ids, dtype=np.int32)
+if multi_modal_data is None and self.llm_engine.multi_modal_processor is not None:
+    multi_modal_data = dict(image_bytes=[], image_sizes=[])
+return self.llm_engine.add_request(
+    user_id="0",  # HACK 随便加一个 user_id
+    request_id=request_id,
+    sampling_params=sampling_params,
+    prompt_token_ids=prompt_token_ids,
+    multi_modal_data=multi_modal_data,
+)</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+          <article class="source-window" aria-label="scheduler.hpp 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/scheduler.hpp</span></div>
+              <span class="src-function">Scheduler::add_sequence()</span>
+            </div>
+            <div class="source-window__meta"><span>L135–142</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L135-L142" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>void add_sequence(std::shared_ptr&lt;Sequence&gt; seq) {
+    seq-&gt;request.arrival_time = get_timestamp_ms();
+    if (engine_type == EngineType::NORMAL) {
+        seq-&gt;reserve_output_tokens();
+        seq-&gt;cache.block_table.reserve(_block_table_capacity(*seq));
+    }
+    waiting.push_back(std::move(seq));
+}</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 对象不是同义词</p>
+          <ol class="line-notes">
+            <li><b>L151–152</b><span><strong>参数与身份先隔离。</strong>SamplingParams 被深拷贝，request_id 从计数器取得；两个请求不会共用一份可变采样配置。</span></li>
+            <li><b>L153–157</b><span><strong>文本只在缺 token IDs 时编码。</strong>编码结果是整数数组，不是 KV，也不是文本片段。后面模型和账本都按 token 处理。</span></li>
+            <li><b>L160–166</b><span><strong>交给 engine，不等于已经上设备。</strong>这里只是把请求交给 LLMEngine；Sequence 的创建/入队继续发生在下游。</span></li>
+            <li><b>L135–141</b><span><strong>waiting 是调度队列，不是 GPU 队列。</strong>加入的是 Sequence 的 shared_ptr；到达时间和输出容量先记在 CPU 账本。</span></li>
+          </ol>
+          <p class="source-bridge"><b>不要把三层画成同一个框：</b>文本是入口类型，token ID 是模型输入，Sequence 是带状态的请求档案。调度器持有 Sequence；CacheEngine 持有设备上的 KV/state 张量。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；短段用于逐行讲解，不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>编码和建档只发生一次，通常不是连续 decode 的主耗时；真正持续的是每步调度、设备下发、KV 增长和输出复制。入口每步复制 <code>RequestOutput</code>，是为了让跨 step 的引用仍然有效，不是免费操作。</p>
+          <p class="perf-boundary">源码因果，不是本机测量。没有 tokenizer 或建队耗时数据。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：为什么 LLM 入口不直接保存 GPU KV？</summary>
+          <div class="question__body"><p>入口负责表达请求与汇总输出，不负责设备内存布局。KV 容量、block 分配和 state 槽位在 worker/cache 侧管理；如果入口也保存一份，状态就会有多个真相。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="chunk" aria-labelledby="chunk-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M02</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--sim">教学算例</span></div>
+          <h2 id="chunk-title">4 / 4 / 2 之后，第一个 token 才出现</h2>
+          <p class="mech-thesis">prefill 读入 prompt 历史；<strong>每个 prefill chunk 都会执行 sampling</strong>，但只有最后一个 chunk 的结果提交为首个输出 token。预算 4 只是本图的条件：预算换成 2 或 6，切法、轮数和首 token 时刻都会变。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>条件</dt><dd>prompt 10 · CP=1 · 无 draft</dd></div>
+          <div><dt>决定</dt><dd>本轮可用 token 预算与是否开 chunk</dd></div>
+          <div><dt>首 token</dt><dd>覆盖完 prompt 的那个 chunk</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>一个长 prompt 可能塞不进单轮 token 预算或 block/state 容量。</dd></div>
+        <div><dt>谁决定</dt><dd><code>_schedule_prefill</code> 截断本轮 q；非最后 chunk 不标 RUNNING。</dd></div>
+        <div><dt>状态怎么变</dt><dd><code>cache.num_tokens</code> 累加；非最后 chunk 的 <code>last_output_token=-1</code> 只跳过 SO 状态更新，sampling 仍执行。</dd></div>
+        <div><dt>代价视角</dt><dd>切小可让单轮预算与容量更易满足，但增加轮次、调度与 launch；不是“chunk 越多越快”。</dd></div>
+      </dl>
+
+      <figure class="lab lab--static lab--chunk-static" data-lab="chunk" aria-labelledby="lab-chunk-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">静态算例 · 参数改变即整链重算 · 无播放</span>
+            <h3 id="lab-chunk-title">这个请求在哪一轮产出第一个 token？</h3>
+          </div>
+          <span class="lab-count lab-count--static" data-chunk-stamp>预算 4 · chunk 开</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="lab-params lab-params--static js-only">
+            <span class="param-label">每轮 token 预算</span>
+            <div class="seg" role="group" aria-label="选择每轮 token 预算">
+              <button type="button" data-chunk-budget="2">2</button>
+              <button type="button" data-chunk-budget="4" aria-pressed="true">4</button>
+              <button type="button" data-chunk-budget="6">6</button>
+            </div>
+            <label class="check-row"><input type="checkbox" data-chunk-toggle checked> chunked_prefill 开启</label>
+            <span class="lab-note">prompt = 10 tokens；切换后下方所有轮次与右侧结果由同一模型重算。</span>
+          </div>
+          <div class="static-workbench">
+            <div class="static-mast" aria-label="chunk 算例的输入与当前参数">
+              <div class="static-mast__cell"><span>输入</span><strong>R0 · prompt 10</strong><small>tokens</small></div>
+              <div class="static-mast__cell"><span>每轮预算</span><strong data-chunk-budget-read>4 tokens / 轮</strong><small>q 的上限</small></div>
+              <div class="static-mast__cell"><span>chunked_prefill</span><strong data-chunk-mode-read>开启 · 可跨轮</strong><small>是否允许切开 prompt</small></div>
+              <div class="static-mast__cell"><span>读法</span><strong>逐轮累计</strong><small>q、k、cache 与提交结果同屏</small></div>
+            </div>
+
+            <div class="static-split">
+              <section class="static-main" aria-label="chunk 判断链与全部有效 prefill 轮">
+                <p class="static-label">判断链 <span>· 每个条件都留在页面上</span></p>
+                <ol class="static-flow">
+                  <li class="static-gate is-run">
+                    <span class="static-gate__no">01</span>
+                    <div class="static-gate__body">
+                      <div class="static-gate__head"><strong>请求长度</strong><span class="static-stamp is-run" data-chunk-gate1-status>通过</span></div>
+                      <p>prompt <b>10</b> ≤ 模型上限 <b>128</b>；请求本身合法，可以进入调度。</p>
+                    </div>
+                  </li>
+                  <li class="static-gate is-run" data-chunk-gate="chunk">
+                    <span class="static-gate__no">02</span>
+                    <div class="static-gate__body">
+                      <div class="static-gate__head"><strong>是否允许分轮</strong><span class="static-stamp is-run" data-chunk-gate2-status>开 · 可跨轮</span></div>
+                      <p data-chunk-gate2-copy>开启 chunk：一个 prompt 可以拆到多轮 prefill；每轮最多读入 q = 预算。</p>
+                    </div>
+                  </li>
+                  <li class="static-gate is-run" data-chunk-gate="limit">
+                    <span class="static-gate__no">03</span>
+                    <div class="static-gate__body">
+                      <div class="static-gate__head"><strong>总预算闸门</strong><span class="static-stamp is-run" data-chunk-gate3-status>可跨轮</span></div>
+                      <p>关闭 chunk 时，prompt_limit = min(128, 本轮总预算 <b data-chunk-limit>4</b>) = <b data-chunk-limit-value>4</b>，完整 prompt 必须一次放进去；开启 chunk 时 prompt_limit 为 128，可跨轮拆开。</p>
+                      <p class="static-gate__why" data-chunk-gate3-copy>本算例开启 chunk，10 个 token 分三轮进入，不受单轮 q=4 的截断。</p>
+                    </div>
+                  </li>
+                </ol>
+
+                <div data-chunk-open>
+                  <div class="static-section-head">
+                    <p class="static-label">全部有效 prefill 轮</p>
+                    <span>非末轮采样后丢弃；末轮才提交</span>
+                  </div>
+                  <ol class="chunk-ledger" data-chunk-rounds>
+                    <li class="chunk-row">
+                      <div class="chunk-row__id"><span>PREFILL 1</span><small>非末轮</small></div>
+                      <div class="chunk-row__cell"><span>本轮 q / k</span><b>q=4 · k=4</b><small>k = 0 + 4</small></div>
+                      <div class="chunk-row__cell"><span>cache</span><b>0 → 4</b><small>num_tokens</small></div>
+                      <div class="chunk-row__cell chunk-row__sample"><span>sampling</span><b class="tone-skip">执行 · 结果丢弃</b><small>last_output_token=-1 只跳过 SO 更新</small></div>
+                      <div class="chunk-row__cell"><span>已提交输出</span><b>0</b><small>仍为 0</small></div>
+                    </li>
+                    <li class="chunk-row">
+                      <div class="chunk-row__id"><span>PREFILL 2</span><small>非末轮</small></div>
+                      <div class="chunk-row__cell"><span>本轮 q / k</span><b>q=4 · k=8</b><small>k = 4 + 4</small></div>
+                      <div class="chunk-row__cell"><span>cache</span><b>4 → 8</b><small>num_tokens</small></div>
+                      <div class="chunk-row__cell chunk-row__sample"><span>sampling</span><b class="tone-skip">执行 · 结果丢弃</b><small>last_output_token=-1 只跳过 SO 更新</small></div>
+                      <div class="chunk-row__cell"><span>已提交输出</span><b>0</b><small>仍为 0</small></div>
+                    </li>
+                    <li class="chunk-row is-first">
+                      <div class="chunk-row__id"><span>PREFILL 3</span><small>末轮 · 首个输出</small></div>
+                      <div class="chunk-row__cell"><span>本轮 q / k</span><b>q=2 · k=10</b><small>k = 8 + 2；剩余只有 2</small></div>
+                      <div class="chunk-row__cell"><span>cache</span><b>8 → 10</b><small>num_tokens</small></div>
+                      <div class="chunk-row__cell chunk-row__sample"><span>sampling</span><b class="tone-run">执行 · 提交</b><small>覆盖完 prompt，last_output_token 有效</small></div>
+                      <div class="chunk-row__cell"><span>已提交输出</span><b>1</b><small>首 token</small></div>
+                    </li>
+                  </ol>
+                  <div class="chunk-decode" data-chunk-decode>
+                    <div class="chunk-decode__tag"><span>下一步</span><b>DECODE</b><small>独立 step</small></div>
+                    <div class="chunk-row__cell"><span>本轮 q / k</span><b>q=1 · k=11</b><small>读刚提交的首 token</small></div>
+                    <div class="chunk-row__cell"><span>cache</span><b>10 → 11</b><small>首 token 被 forward</small></div>
+                    <div class="chunk-row__cell"><span>sampling</span><b class="tone-run">执行 · 提交</b><small>产生第 2 个输出</small></div>
+                    <div class="chunk-row__cell"><span>已提交输出</span><b>2</b><small>get_len()=12</small></div>
+                  </div>
+                  <p class="static-invariant">每个 prefill chunk 都执行 sampling。所有非最后轮算出了结果也不提交；<code>last_output_token=-1</code> 只让 sampler 跳过 SO 状态更新，不是关掉 sampling。</p>
+                </div>
+
+                <div class="chunk-rejected" data-chunk-rejected hidden>
+                  <div class="chunk-rejected__head"><span class="static-gate__no">止</span><strong>FINISHED_IGNORED · 移出 waiting</strong></div>
+                  <p data-chunk-rejected-copy>prompt 10 &gt; prompt_limit 4：完整 prompt 放不进本轮，且关闭 chunk 后不能跨轮，所以请求被忽略。</p>
+                  <p>这不是“等下一轮”。只有完整 prompt 未超过 prompt_limit、但本批剩余预算暂时不足时，才留在 waiting。</p>
+                </div>
+              </section>
+
+              <aside class="static-rail" aria-label="chunk 同一算例的结果与读法">
+                <section class="static-result" aria-labelledby="chunk-result-title">
+                  <div class="static-result__head"><p class="static-label" id="chunk-result-title">同一算例的结果</p><span class="badge badge--wait">教学</span></div>
+                  <dl class="static-result__list">
+                    <div><dt>切法</dt><dd data-chunk-result-cut>4 / 4 / 2</dd></div>
+                    <div><dt>首 token</dt><dd data-chunk-result-first>第 3 轮 · 提交 1 个</dd></div>
+                    <div><dt>sampling</dt><dd data-chunk-result-sampling>3 次执行 · 1 次提交</dd></div>
+                    <div><dt>cache / get_len</dt><dd data-chunk-result-state>10 / 11</dd></div>
+                    <div><dt>下一步</dt><dd data-chunk-result-next>decode · q=1, k=11</dd></div>
+                    <div><dt>请求状态</dt><dd class="tone-run" data-chunk-result-status>继续 decode</dd></div>
+                  </dl>
+                  <p class="static-result__why" data-chunk-result-note>前两轮 sampling 结果被丢弃；第三轮覆盖完 prompt 才提交首 token。首 token 尚未 forward，所以 cache 仍是 10，而 get_len 已是 11。</p>
+                </section>
+                <section class="static-read" aria-labelledby="chunk-why-title">
+                  <p class="static-label" id="chunk-why-title">为什么不是 q=4、k=12</p>
+                  <p data-chunk-why>prompt 只剩 2 个 token，q 取 min(预算 4, 剩余 2)=2；k = 已缓存 8 + 2 = 10。下一 decode 的 q=1 才 forward 刚提交的首 token，并把 cache 推到 11。</p>
+                  <p class="static-sourcehint">源码锚点：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L470-L475" target="_blank" rel="noopener noreferrer">scheduler.hpp:470–475</a> · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/sequence.hpp#L386-L388" target="_blank" rel="noopener noreferrer">sequence.hpp:386–388</a></p>
+                </section>
+              </aside>
+            </div>
+          </div>
+        </div>
+        <div class="lab-state">
+          <span class="tag tag--sim">全链结论</span>
+          <p data-live aria-live="polite">预算 4、chunk 开：三轮 prefill 的 q/k 为 4/4、4/8、2/10；第三轮提交首个输出，下一 decode 用 q=1、k=11。</p>
+        </div>
+        <p class="lab-foot">改变预算或关闭 chunked_prefill 会立即重算整条链。这里的“轮”只表示该请求的有效 prefill 进展，不是全局 step 编号；prefill 与 decode 分批在不同 step。</p>
+        <div class="nojs-fallback nojs-only">
+          <h4>无 JavaScript 分步回退</h4>
+          <p>固定 prompt 长 10、CP=1、无 draft、资源充足：</p>
+          <table>
+            <thead><tr><th>预算</th><th>有效 prefill 轮</th><th>首 token</th><th>下一 decode</th></tr></thead>
+            <tbody>
+              <tr><td>4</td><td>q=4,k=4 → q=4,k=8 → q=2,k=10</td><td>第 3 轮，输出 1 个</td><td>q=1,k=11</td></tr>
+              <tr><td>2</td><td>2 / 2 / 2 / 2 / 2</td><td>第 5 轮</td><td>q=1,k=11</td></tr>
+              <tr><td>6</td><td>6 / 4</td><td>第 2 轮</td><td>q=1,k=11</td></tr>
+              <tr><td>2 / 4 / 6，关闭 chunk</td><td>完整 prompt 10 超过 prompt_limit</td><td>不会出现 4/4/2；标为 FINISHED_IGNORED 并移出 waiting</td><td>—</td></tr>
+            </tbody>
+          </table>
+          <p>关闭 chunk 时，完整 prompt 必须一次放进本批总预算；本算例 prompt 10 在预算 2、4、6 下都超过 prompt_limit，三种情况都会被标为 <code>FINISHED_IGNORED</code> 并移出 waiting，不会暂缓到下一轮。只有“完整 prompt 本身合法、但本批剩余预算不足”时，才会留在 waiting 等下一批。</p>
+          <p>每个 prefill chunk 都会执行 sampling；前两轮的结果被丢弃，<code>last_output_token=-1</code> 只跳过 SO 状态更新，不是采样总开关。第三轮完成 prompt 后提交首个输出 token；此时 <code>len=11</code>、<code>cache.num_tokens=10</code>，刚采出的第一个输出 token 尚未 forward，下一次 decode 才处理它。</p>
+        </div>
+      </figure>
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="scheduler.hpp chunk 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/scheduler.hpp</span></div>
+              <span class="src-function">Scheduler::_schedule_prefill()</span>
+            </div>
+            <div class="source-window__meta"><span>L470–475</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L470-L475" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>if (seq_workload &gt; (max_num_batched_tokens - num_batched_tokens) / cp_align * cp_align) {
+    new_workload = std::min(seq_workload, (max_num_batched_tokens - num_batched_tokens) / cp_align * cp_align);
+    seqlen_q = new_workload;
+    TORCH_CHECK(
+        seqlen_q &lt; seq_workload, "_schedule: is_chunked must be true:, seqlen_q:", seqlen_q, " seq_workload: ", seq_workload);
+}</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+          <article class="source-window" aria-label="sequence.hpp 源码摘录">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/sequence.hpp</span></div>
+              <span class="src-function">SequenceMetadata 构造函数</span>
+            </div>
+            <div class="source-window__meta"><span>L386–388</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/sequence.hpp#L386-L388" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>if (is_prompt &amp;&amp; !is_last_prompt_chunk()) {
+    last_output_token = -1; // 非最后 prefill chunk 本步不产出 token，sampler 以此跳过 SO 更新
+}</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 首 token 的条件</p>
+          <ol class="line-notes">
+            <li><b>L470–474</b><span><strong>q 被剩余预算截断。</strong>这里的 <code>seqlen_q</code> 是本次 forward 的 query 行数；<code>cache.num_tokens</code> 是已经缓存的 prompt 前缀。剩余 prompt 按 <code>get_len() - cache.num_tokens</code> 计算，不是 <code>seqlen_q - cache.num_tokens</code>。</span></li>
+            <li><b>L504–511</b><span><strong>是否允许切块。</strong>若本轮被截短且 <code>chunked_prefill</code> 为假，直接不排这个请求；所以关闭后不会凭空出现同一组 4/4/2（<a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L504-L511" target="_blank" rel="noopener noreferrer">固定行 ↗</a>）。</span></li>
+            <li><b>L386–388</b><span><strong>非最后 chunk 不提交输出。</strong>不是跳过 sampling，而是 metadata 的 <code>last_output_token</code> 被置为 -1；sampling 照常执行，sampler 只跳过 SO 状态更新，结果不提交为输出 token。</span></li>
+            <li><b>第三轮之后</b><span><strong>首 token 已采样，但还没 forward。</strong>此时 <code>len</code> 已加 1，而 <code>cache.num_tokens</code> 仍是 10；下一 decode 的 q=1 才处理这个新 token。</span></li>
+          </ol>
+          <p class="source-bridge"><b>首 token 时刻的准确说法：</b>不是“第一个 chunk 开始”就产出，也不是“prompt 长度除以预算”的纯数学结果；必须看本轮是否覆盖完 prompt、是否被资源条件截断，以及本步是否真的是最后 chunk。</p>
+          <p class="source-attrib">源码事实来自固定 SHA；教学表的 4/4/2 是缩小算例，不是性能测试。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>chunk 把一次大 prefill 拆成多轮可排的工作；这个版本不支持把 prefill 与 decode 混在同一批，二者安排在不同 step。代价是更多轮调度、launch 和中间状态。首 token 的等待由预算、容量、并行布局和实际覆盖轮次共同决定，不能只用一个“批越大越快”的按钮解释。</p>
+          <p class="perf-boundary">源码因果，不是本机测量。页面不给 TTFT 或 MFU 收益百分比。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：预算 4 时，为什么第三轮不是 q=4、k=12？</summary>
+          <div class="question__body"><p>prompt 只剩 2 个 token 没处理，q 不需要再凑满 4。第三轮 q=2，k = 已缓存 8 + 2 = 10；每个 chunk 都执行 sampling，只是这一轮的 sampling 结果此时才提交为首个输出 token，于是 len=11。下一 decode 的 k=11 来自新 token 还要被 forward。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="vote" aria-labelledby="vote-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M03</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="mech-time">两次 all-reduce + 一次本地排班</span></div>
+          <h2 id="vote-title">两个 rank，为什么不能各自决定这一步做什么</h2>
+          <p class="mech-thesis">NORMAL 引擎在 DP 组里统一本轮做 prefill 还是 decode。第一个投票只回答“<strong>想不想</strong>”；一个 rank 想，不代表它真能排进块。第二个投票确认“<strong>有没有人真的排出 prefill</strong>”，然后才决定谁陪跑空 prefill。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>尝试点</dt><dd>ALL / ANY / 非尝试点</dd></div>
+          <div><dt>票一</dt><dd>want 的 all-reduce</dd></div>
+          <div><dt>票二</dt><dd>outputs 是否为空的 all-reduce</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>同一 DP 组的多 rank 若步型不同，集合通信和批次节奏很难对齐。</dd></div>
+        <div><dt>谁决定</dt><dd>C++ Scheduler 的 NORMAL 分支；want 还要看 cache 水位与队头。</dd></div>
+        <div><dt>状态怎么变</dt><dd>先统一 do_prefill，再统一 any_scheduled；没排出的 rank 可能空 prefill。</dd></div>
+        <div><dt>代价视角</dt><dd>协调与陪跑不是免费；ANY 减少孤立等待，ALL 减少空 step。</dd></div>
+      </dl>
+
+      <figure class="vote-lab" data-lab="vote" aria-labelledby="lab-vote-title">
+  <header class="vote-head">
+    <div class="vote-head__copy">
+      <p class="vote-eyebrow"><span class="vote-eyebrow__mark">vote</span> 静态对账 · 2 个 DP rank · 教学简化</p>
+      <h3 id="lab-vote-title">两票判路：本轮 <code>prefill</code> 还是 <code>decode</code></h3>
+      <p class="vote-lede">票一汇总 <code>want</code>，票二汇总本地是否真的排出了请求。五段路径一次展开；改动参数会同步重算全部数字与文字，所有条件和结果都在同一画面。</p>
+    </div>
+    <div class="vote-legend" aria-label="状态图例">
+      <span class="vote-legend__title">图例</span>
+      <span class="vote-legend__item"><i class="vote-legend__dot vote-legend__dot--run" aria-hidden="true"></i>已执行</span>
+      <span class="vote-legend__item"><i class="vote-legend__dot vote-legend__dot--skip" aria-hidden="true"></i>未执行</span>
+      <span class="vote-legend__item"><i class="vote-legend__dot vote-legend__dot--true" aria-hidden="true"></i>true / 有</span>
+      <span class="vote-legend__item"><i class="vote-legend__dot vote-legend__dot--false" aria-hidden="true"></i>false / 空</span>
+      <span class="vote-legend__item"><i class="vote-legend__dot vote-legend__dot--placeholder" aria-hidden="true"></i>placeholder</span>
+    </div>
+  </header>
+
+  <section class="vote-controls" aria-labelledby="lab-vote-controls-title">
+    <div class="vote-controls__head">
+      <h4 id="lab-vote-controls-title"><span>参数台</span><small>改一项，五段同时重算</small></h4>
+      <p>控件直接改变输入；下方每个阶段和结果都按当前参数同步更新。</p>
+    </div>
+    <div class="vote-controls__grid">
+      <fieldset class="vote-mode-field">
+        <legend>decode_step 尝试点</legend>
+        <div class="vote-mode" role="group" aria-label="选择尝试点类型">
+          <button class="vote-mode__btn" type="button" data-vote-mode="all" aria-pressed="false"><b>ALL</b><small>AND · 全员 want</small></button>
+          <button class="vote-mode__btn" type="button" data-vote-mode="any" aria-pressed="true"><b>ANY</b><small>OR · 任一 want</small></button>
+          <button class="vote-mode__btn" type="button" data-vote-mode="none" aria-pressed="false"><b>NONE</b><small>非尝试点 · 跳过</small></button>
+        </div>
+        <p class="vote-field-note" data-vote-mode-note>ANY：票一取 <code>want₀ OR want₁</code>；非尝试点会跳过两票与本地。</p>
+      </fieldset>
+
+      <div class="vote-params" aria-label="各 rank 的 want 与 fit 参数">
+        <fieldset class="vote-rank-param" data-vote-param="0">
+          <legend><span class="vote-rank-id">R0</span>rank 0</legend>
+          <label class="vote-toggle">
+            <input type="checkbox" data-vote-want="0" checked>
+            <span class="vote-toggle__copy"><b>want</b><small>有可调度 prefill</small></span>
+            <span class="vote-toggle__state" data-vote-want-state="0">true</span>
+            <span class="vote-toggle__box" aria-hidden="true"></span>
+          </label>
+          <label class="vote-toggle">
+            <input type="checkbox" data-vote-fit="0" checked>
+            <span class="vote-toggle__copy"><b>fit</b><small>本轮真能排入块</small></span>
+            <span class="vote-toggle__state" data-vote-fit-state="0">true</span>
+            <span class="vote-toggle__box" aria-hidden="true"></span>
+          </label>
+          <p class="vote-effect" data-vote-fit-effect="0">读取 · 排入有请求</p>
+        </fieldset>
+
+        <fieldset class="vote-rank-param" data-vote-param="1">
+          <legend><span class="vote-rank-id">R1</span>rank 1</legend>
+          <label class="vote-toggle">
+            <input type="checkbox" data-vote-want="1">
+            <span class="vote-toggle__copy"><b>want</b><small>有可调度 prefill</small></span>
+            <span class="vote-toggle__state" data-vote-want-state="1">false</span>
+            <span class="vote-toggle__box" aria-hidden="true"></span>
+          </label>
+          <label class="vote-toggle">
+            <input type="checkbox" data-vote-fit="1" checked>
+            <span class="vote-toggle__copy"><b>fit</b><small>本轮真能排入块</small></span>
+            <span class="vote-toggle__state" data-vote-fit-state="1">true</span>
+            <span class="vote-toggle__box" aria-hidden="true"></span>
+          </label>
+          <p class="vote-effect is-muted" data-vote-fit-effect="1">不读取 · want=false</p>
+        </fieldset>
+      </div>
+    </div>
+    <p class="vote-param-note"><b>fit 的读取条件：</b>只在 want=true 且票一实际进入本地调用时读取。want=false 的 rank 根本不调用 <code>_schedule_prefill</code>，这不是“排班失败”。</p>
+  </section>
+
+  <section class="vote-now" aria-labelledby="lab-vote-now-title">
+    <div class="vote-now__main">
+      <p class="vote-now__eyebrow">当前快照 <span data-vote-mode-label>ANY 尝试点</span></p>
+      <div class="vote-now__headline">
+        <span class="vote-verdict vote-verdict--prefill" data-vote-verdict>PRE-FILL 组</span>
+        <h4 id="lab-vote-now-title" data-vote-headline>票二 true：组内进入 prefill</h4>
+      </div>
+      <p class="vote-now__summary" data-vote-summary aria-live="polite">ANY 尝试点 · want 1/2 → 票一 true；本地真实请求 1/2 → 票二 true。R0 真实 prefill，R1 空 prefill（placeholder）。</p>
+    </div>
+    <dl class="vote-kpis">
+      <div><dt>票一 <code>do_prefill</code></dt><dd><span class="vote-pill vote-pill--true" data-vote-kpi-first>true</span></dd></div>
+      <div><dt>本地真实请求</dt><dd><span class="vote-kpi-value" data-vote-kpi-local>1 / 2</span></dd></div>
+      <div><dt>票二 <code>any_scheduled</code></dt><dd><span class="vote-pill vote-pill--true" data-vote-kpi-second>true</span></dd></div>
+    </dl>
+  </section>
+
+  <section class="vote-board" aria-labelledby="lab-vote-board-title">
+    <div class="vote-section-head">
+      <h4 id="lab-vote-board-title">五段路径 · 同一快照</h4>
+      <p>灰底表示整段<strong>未执行</strong>，不是返回了 false。R0 / R1 的编号贯穿两票、本地调用与结果。</p>
+    </div>
+
+    <ol class="vote-stages">
+      <li class="vote-stage" data-vote-stage="gate">
+        <div class="vote-stage__head">
+          <span class="vote-stage__index">00</span>
+          <h5>尝试点</h5>
+          <span class="vote-pill vote-pill--run" data-vote-stage-status>已执行</span>
+        </div>
+        <div class="vote-stage__core">
+          <strong data-vote-gate-value>ANY 尝试点</strong>
+          <span data-vote-gate-sub>命中 → 进入票一</span>
+        </div>
+        <p class="vote-stage__note" data-vote-gate-note>ANY：任一 want=true 就能通过票一。</p>
+      </li>
+
+      <li class="vote-stage" data-vote-stage="first">
+        <div class="vote-stage__head">
+          <span class="vote-stage__index">01</span>
+          <h5>票一 · 想不想</h5>
+          <span class="vote-pill vote-pill--run" data-vote-stage-status>已执行</span>
+        </div>
+        <div class="vote-formula"><span class="vote-formula__op" data-vote-first-op>ANY · OR</span><span aria-hidden="true">→</span><code>do_prefill</code></div>
+        <div class="vote-stage__outcome"><span class="vote-pill vote-pill--true" data-vote-first-outcome>true</span><small>归约结果</small></div>
+        <div class="vote-stage-ranks">
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R0</span><span class="vote-stage-rank__detail"><span class="vote-stage-rank__main" data-vote-first-row="0">want=true · 输入 1</span></span></div>
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R1</span><span class="vote-stage-rank__detail"><span class="vote-stage-rank__main" data-vote-first-row="1">want=false · 输入 0</span></span></div>
+        </div>
+        <p class="vote-stage__note" data-vote-first-note>OR 通过：至少一个 want=true；票一为 true 才进入本地。</p>
+      </li>
+
+      <li class="vote-stage" data-vote-stage="local">
+        <div class="vote-stage__head">
+          <span class="vote-stage__index">02</span>
+          <h5>本地排班</h5>
+          <span class="vote-pill vote-pill--run" data-vote-stage-status>已执行</span>
+        </div>
+        <div class="vote-formula"><span class="vote-formula__op" data-vote-local-op>按 want</span><span aria-hidden="true">→</span><code>_schedule_prefill</code></div>
+        <div class="vote-stage__metric"><strong data-vote-local-count>1 / 2</strong><span>本地有请求</span></div>
+        <div class="vote-stage-ranks">
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R0</span><span class="vote-stage-rank__detail"><span class="vote-stage-rank__main" data-vote-local-cond="0">want=true · fit=true</span><b class="vote-call vote-call--hit" data-vote-local-call="0">调用 → 有请求</b></span></div>
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R1</span><span class="vote-stage-rank__detail"><span class="vote-stage-rank__main" data-vote-local-cond="1">want=false · fit 不读取</span><b class="vote-call vote-call--no-call" data-vote-local-call="1">未调用</b></span></div>
+        </div>
+        <p class="vote-stage__note" data-vote-local-note>R1 want=false：不调用本地 <code>_schedule_prefill</code>，但仍参与票二。</p>
+      </li>
+
+      <li class="vote-stage" data-vote-stage="second">
+        <div class="vote-stage__head">
+          <span class="vote-stage__index">03</span>
+          <h5>票二 · 排没排出来</h5>
+          <span class="vote-pill vote-pill--run" data-vote-stage-status>已执行</span>
+        </div>
+        <div class="vote-formula"><span class="vote-formula__op" data-vote-second-op>OR</span><span aria-hidden="true">→</span><code>any_scheduled</code></div>
+        <div class="vote-stage__outcome"><span class="vote-pill vote-pill--true" data-vote-second-outcome>true</span><small>归约结果</small></div>
+        <div class="vote-stage-ranks">
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R0</span><span class="vote-stage-rank__detail"><span class="vote-stage-rank__main" data-vote-second-row="0">输入 1 · 参与</span><span class="vote-stage-rank__sub" data-vote-second-src="0">本地有请求</span></span></div>
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R1</span><span class="vote-stage-rank__detail"><span class="vote-stage-rank__main" data-vote-second-row="1">输入 0 · 参与</span><span class="vote-stage-rank__sub" data-vote-second-src="1">未调用本地</span></span></div>
+        </div>
+        <p class="vote-stage__note" data-vote-second-note>OR 归约两个 rank；R1 未调用本地也投 0，仍被计入。</p>
+      </li>
+
+      <li class="vote-stage" data-vote-stage="exec">
+        <div class="vote-stage__head">
+          <span class="vote-stage__index">04</span>
+          <h5>执行与回写</h5>
+          <span class="vote-pill vote-pill--run" data-vote-stage-status>已执行</span>
+        </div>
+        <div class="vote-verdict vote-verdict--prefill" data-vote-exec-verdict>PRE-FILL 组</div>
+        <div class="vote-stage-ranks">
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R0</span><span class="vote-stage-rank__detail"><b class="vote-result vote-result--real" data-vote-exec-row="0">真实 prefill</b><span class="vote-stage-rank__sub" data-vote-exec-sub="0">本地有请求</span></span></div>
+          <div class="vote-stage-rank"><span class="vote-stage-rank__id">R1</span><span class="vote-stage-rank__detail"><b class="vote-result vote-result--placeholder" data-vote-exec-row="1">空 prefill</b><span class="vote-stage-rank__sub" data-vote-exec-sub="1">placeholder · block_table=[0]</span></span></div>
+        </div>
+        <p class="vote-stage__note" data-vote-exec-note>票二 true；没有真实请求的 rank 用 placeholder（<code>block_table=[0]</code>）维持步型。</p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="vote-branches" aria-labelledby="lab-vote-branches-title">
+    <div class="vote-section-head">
+      <h4 id="lab-vote-branches-title">四类出口 · 与参数无关的速查</h4>
+      <p>ALL / ANY 只改变票一的 AND / OR；是否进入 prefill 还要过票二。</p>
+    </div>
+    <div class="vote-branch-grid">
+      <article class="vote-branch">
+        <div class="vote-branch__top"><span class="vote-branch__code">A</span><p class="vote-branch__cond">非尝试点</p></div>
+        <p class="vote-branch__desc">票一、本地排班、票二全不执行。</p>
+        <strong class="vote-branch__out vote-branch__out--decode">→ DECODE</strong>
+      </article>
+      <article class="vote-branch">
+        <div class="vote-branch__top"><span class="vote-branch__code">B</span><p class="vote-branch__cond">尝试点 · 票一 false</p></div>
+        <p class="vote-branch__desc">票一已经返回 false；本地排班与票二未执行。</p>
+        <strong class="vote-branch__out vote-branch__out--decode">→ DECODE</strong>
+      </article>
+      <article class="vote-branch">
+        <div class="vote-branch__top"><span class="vote-branch__code">C</span><p class="vote-branch__cond">票一 true · 票二 false</p></div>
+        <p class="vote-branch__desc">本地真实请求为 0；未调用与调用空手都计 0。</p>
+        <strong class="vote-branch__out vote-branch__out--decode">→ 全组 DECODE</strong>
+      </article>
+      <article class="vote-branch">
+        <div class="vote-branch__top"><span class="vote-branch__code">D</span><p class="vote-branch__cond">票一 true · 票二 true</p></div>
+        <p class="vote-branch__desc">有真实请求者跑真实 prefill；其余用 placeholder。</p>
+        <strong class="vote-branch__out vote-branch__out--prefill">→ PRE-FILL 组</strong>
+      </article>
+    </div>
+  </section>
+
+  <p class="vote-foot"><span>口径</span>票一只归约 want；票二只归约本地真实请求。未调用本地的 rank 仍作为 0 参与票二，不能说成“排班失败”。placeholder 只是执行占位，不是真实排班结果。</p>
+  <noscript><p class="vote-noscript">参数控件需要 JavaScript；上方是默认参数快照，仍可完整阅读全部阶段与条件。</p></noscript>
+</figure>
+
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="scheduler.hpp 第一次投票源码">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/scheduler.hpp</span></div>
+              <span class="src-function">Scheduler::_schedule() / NORMAL</span>
+            </div>
+            <div class="source-window__meta"><span>L308–321</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L308-L321" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>bool is_any_point = (decode_step != 0) &amp;&amp; (decode_step % prefill_any_attempt_interval == 0);
+bool is_all_point = (decode_step % prefill_attempt_interval == 0);
+if (!is_any_point &amp;&amp; !is_all_point) {
+    return _schedule_decode(acquire);
+}
+bool want = (get_gpu_cache_usage() &lt;= GPU_CACHE_PREFILL_WATERMARK) &amp;&amp; _has_prefill_waiting();
+bool do_prefill;
+if (is_any_point) {
+    do_prefill = (_dp_allreduce(want ? 0 : 1, c10d::ReduceOp::MIN) == 0); // ANY：任一 rank 想做即触发
+} else {
+    do_prefill = (_dp_allreduce(want ? 1 : 0, c10d::ReduceOp::MIN) == 1); // ALL：全员想做才触发
+}
+if (!do_prefill) {
+    return _schedule_decode(acquire);
+}</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+          <article class="source-window" aria-label="scheduler.hpp 第二次投票源码">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/scheduler.hpp</span></div>
+              <span class="src-function">Scheduler::_schedule() / 第二轮</span>
+            </div>
+            <div class="source-window__meta"><span>L323–340</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L323-L340" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>std::unique_ptr&lt;SchedulerOutputs&gt; outputs;
+if (want) {
+    outputs = _schedule_prefill(acquire);
+}
+
+bool any_scheduled = (_dp_allreduce(outputs ? 0 : 1, c10d::ReduceOp::MIN) == 0);
+if (!any_scheduled) {
+    return _schedule_decode(acquire);
+}
+if (outputs) {
+    return outputs;
+}
+// 组内确有 rank 在做 prompt：本 rank 陪跑空 prompt step 保持步型一致
+return _make_outputs({}, true, 0, {}, {}, {}, 0);</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 两次决策不能合并</p>
+          <ol class="line-notes">
+            <li><b>L308–312</b><span><strong>先看是不是尝试点。</strong>ALL 和 ANY 在不同间隔检查，重合时 ANY 优先。不是每个 decode step 都投票；非尝试点直接 <code>_schedule_decode</code>，票一、本地排班、票二都不执行。</span></li>
+            <li><b>L313</b><span><strong>want 不是“有请求”。</strong>还要求 cache 使用率不超过水位，并且队头有可调度的 prefill。两个 rank 的 want 可以不同。</span></li>
+            <li><b>L316–318</b><span><strong>票一只产生步型。</strong>ANY 用 MIN 看是否有人投 0；ALL 用 MIN 看是否全员投 1。它不检查本地 slot 是否真的能排下。</span></li>
+            <li><b>L323–326</b><span><strong>本地排班可能空手。</strong>只有 want 为真才去试；试了也可能因为 slot、block/state 容量或多模态对齐而返回空。</span></li>
+            <li><b>L332–340</b><span><strong>票二确认“真的有人做”。</strong>全组都空手就回 decode，避免 prefill 死循环；若别的 rank 有 prefill，本 rank 返回空 prompt 输出，Worker 接着构造 placeholder 并执行占位 forward。</span></li>
+          </ol>
+          <p class="source-bridge"><b>空 prefill 也是执行：</b>它不是“什么都没发生”。Worker 会用 <code>block_table=[0]</code> 的 placeholder metadata 调主模型（link below），所以看单 rank GPU busy 不能证明有效 token 增加。</p>
+          <p class="source-attrib">placeholder 构造见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/model_runner.py#L386-L403" target="_blank" rel="noopener noreferrer">model_runner.py:386–403</a>；Worker 分支见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L120-L127" target="_blank" rel="noopener noreferrer">worker.py:120–127</a>。短段摘录不复制完整文件。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>ALL 追求“全员有活再做”，减少一个 rank 干活、其余 rank 陪跑；ANY 给孤立 rank 一个最迟等待窗口，但会让没排出的 rank 执行 placeholder。两次 all-reduce 和空 prefill 都计入成本，收益要按真实 token、placeholder 占比和全组 step 时间一起看。</p>
+          <p class="perf-boundary">源码因果，不是本机测量；不承诺固定 TTFT 改善。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：rank0 想 prefill 但块不够，ANY 会直接让它单独跑吗？</summary>
+          <div class="question__body"><p>不会。ANY 的票一只让全组进入 prefill 尝试；rank0 本地排班仍可能空手。若全组都空手，票二把它拉回 decode。若另一个 rank 排出了 prefill，rank0 才以空 prefill 陪跑。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech" id="preempt" aria-labelledby="preempt-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M04</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--sim">教学算例</span></div>
+          <h2 id="preempt-title">KV 紧了，先请谁让路</h2>
+          <p class="mech-thesis">这份实现把 <code>running</code> 按输出长度降序排：<strong>尾部较短</strong>的先尝试执行，<strong>头部较长</strong>的当 victim。空间还是不够时，抢占可以终止请求，也可以清运行状态后重算；已经提交给用户看的历史不会被动画删掉。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>排序</dt><dd>output_len 降序</dd></div>
+          <div><dt>执行</dt><dd>从尾端取较短请求</dd></div>
+          <div><dt>让路</dt><dd>从头端选较长 victim</dd></div>
+        </dl>
+      </header>
+
+      <dl class="mech-facts">
+        <div><dt>遇到问题</dt><dd>decode 还要追加 KV，但空闲块可能已经不够。</dd></div>
+        <div><dt>谁决定</dt><dd><code>_schedule_decode</code> 与 <code>_preempt</code>；模式决定终止或重算。</dd></div>
+        <div><dt>状态怎么变</dt><dd>终止 → FINISHED_PREEMPTED；重算 → 清运行 cache/inflight/MTP，回 waiting 队头。</dd></div>
+        <div><dt>代价视角</dt><dd>终止损失完成率；重算消耗额外计算。释放块不是免费收益。</dd></div>
+      </dl>
+
+      <figure class="preempt-lab" data-lab="preempt" aria-labelledby="lab-preempt-title">
+  <div class="preempt-shell">
+    <header class="preempt-head">
+      <div class="preempt-head__copy">
+        <p class="preempt-kicker"><span class="preempt-kicker__tag">PREEMPT</span> 静态算例 · A/B/C output_len 12/5/1</p>
+        <h3 id="lab-preempt-title">处理 C 的一次迭代：谁让路，动了哪些块</h3>
+        <p class="preempt-deck">running 先按 <code>output_len</code> 降序排成 <code>[A, B, C]</code>：尾端 C 本轮执行，已有 1 块，还需追加 1 个 KV 块。空闲池够就直接放，不够才从头端取 A 作为 victim（被抢占、被迫让出块的 running 请求）。下面同屏给出条件、生效/未执行路径和块账本。</p>
+      </div>
+      <div class="preempt-scope" role="note" aria-label="本图范围">
+        <span class="preempt-scope__main">1 次迭代</span>
+        <span class="preempt-scope__line">只到处理 C</span>
+        <span class="preempt-scope__line preempt-scope__line--warn">不是整轮 running</span>
+      </div>
+    </header>
+
+    <div class="preempt-legend" role="group" aria-label="图例">
+      <span class="preempt-legend__title">图例</span>
+      <span class="preempt-legend__group">
+        <span class="preempt-legend__label">请求</span>
+        <span class="preempt-legend__item"><i class="preempt-dot preempt-dot--a" aria-hidden="true"></i>A</span>
+        <span class="preempt-legend__item"><i class="preempt-dot preempt-dot--b" aria-hidden="true"></i>B</span>
+        <span class="preempt-legend__item"><i class="preempt-dot preempt-dot--c" aria-hidden="true"></i>C</span>
+      </span>
+      <span class="preempt-legend__group">
+        <span class="preempt-legend__label">状态</span>
+        <span class="preempt-badge preempt-badge--run">running</span>
+        <span class="preempt-badge preempt-badge--wait">WAITING</span>
+        <span class="preempt-badge preempt-badge--ended">FINISHED_PREEMPTED</span>
+      </span>
+      <span class="preempt-legend__group">
+        <span class="preempt-legend__label">KV 块</span>
+        <span class="preempt-chip preempt-chip--a">#12</span> 占用
+        <span class="preempt-chip preempt-chip--free">#4</span> 空闲
+      </span>
+      <span class="preempt-legend__group">
+        <span class="preempt-legend__label">路径</span>
+        <span class="preempt-badge preempt-badge--active">本轮生效</span>
+        <span class="preempt-badge preempt-badge--skip">未执行</span>
+      </span>
+      <span class="preempt-legend__note">尾端 = 本轮处理 · victim = 被抢占让路 · 全图复用同一套块号与 state 号</span>
+    </div>
+
+    <div class="preempt-controls" role="group" aria-label="静态对照参数">
+      <div class="preempt-control">
+        <span class="preempt-control__label" id="preempt-free-label">处理 C 前的空闲池</span>
+        <div class="preempt-seg" role="group" aria-labelledby="preempt-free-label">
+          <button type="button" data-preempt-pool="0" aria-pressed="true">0 块 <span class="preempt-seg__sub">默认</span></button>
+          <button type="button" data-preempt-pool="1" aria-pressed="false">1 块 <span class="preempt-seg__sub">空闲 #7</span></button>
+        </div>
+      </div>
+      <div class="preempt-control">
+        <span class="preempt-control__label" id="preempt-mode-label">victim A 的处置</span>
+        <div class="preempt-seg" role="group" aria-labelledby="preempt-mode-label">
+          <button type="button" data-preempt-mode="stop" aria-pressed="true">终止 <span class="preempt-seg__sub">FINISHED_PREEMPTED</span></button>
+          <button type="button" data-preempt-mode="recompute" aria-pressed="false">清状态重算 <span class="preempt-seg__sub">WAITING 队头</span></button>
+        </div>
+        <span class="preempt-control__hint" data-preempt-mode-hint>victim=A；选中的处置会执行。</span>
+      </div>
+      <div class="preempt-control preempt-control--readout">
+        <span class="preempt-control__label">当前对照</span>
+        <p class="preempt-readout" data-preempt-readout aria-live="polite">空闲 0 块 · 需要 1 块 → <strong>victim 让路</strong> · A 终止</p>
+      </div>
+    </div>
+    <p class="preempt-param-note" data-preempt-param-note><strong>当前无空闲：</strong>C 本轮需要 victim；A 被抢占后退出 running，后续 B 不会再次选中 A。</p>
+
+    <div class="preempt-main">
+      <section class="preempt-section" aria-labelledby="preempt-order-title">
+        <div class="preempt-section__head">
+          <span class="preempt-step" aria-hidden="true">01</span>
+          <div class="preempt-section__copy">
+            <h4 id="preempt-order-title">本轮输入：先排序，再取两端</h4>
+            <p>排序只决定两端；取到 C 之后，再单独判断空闲池。</p>
+          </div>
+        </div>
+
+        <div class="preempt-order">
+          <div class="preempt-order__cell">
+            <span class="preempt-order__klabel">初始 running</span>
+            <p class="preempt-order__before"><span>B</span><i aria-hidden="true">→</i><span>A</span><i aria-hidden="true">→</i><span>C</span></p>
+          </div>
+          <div class="preempt-order__sort">
+            <span>按 <code>output_len</code> 降序</span>
+            <i aria-hidden="true">↓</i>
+          </div>
+          <div class="preempt-order__cell preempt-order__cell--sorted">
+            <span class="preempt-order__klabel">排序后 · 本轮从两端取</span>
+            <ol class="preempt-seq" aria-label="排序后的 running 顺序">
+              <li class="preempt-seq__item preempt-seq__item--a preempt-seq__item--victim" data-preempt-seq-item="A">
+                <span class="preempt-seq__role">头端</span>
+                <span class="preempt-seq__name"><i class="preempt-dot preempt-dot--a" aria-hidden="true"></i>A</span>
+                <span class="preempt-seq__meta"><code>output 12</code><span>state 17</span><span>3 块</span></span>
+                <span class="preempt-seq__tag" data-preempt-a-role>本轮 victim</span>
+              </li>
+              <li class="preempt-seq__item preempt-seq__item--b" data-preempt-seq-item="B">
+                <span class="preempt-seq__role">中间</span>
+                <span class="preempt-seq__name"><i class="preempt-dot preempt-dot--b" aria-hidden="true"></i>B</span>
+                <span class="preempt-seq__meta"><code>output 5</code><span>state 12</span><span>2 块</span></span>
+                <span class="preempt-seq__tag">本轮不处理</span>
+              </li>
+              <li class="preempt-seq__item preempt-seq__item--c preempt-seq__item--selected" data-preempt-seq-item="C">
+                <span class="preempt-seq__role">尾端</span>
+                <span class="preempt-seq__name"><i class="preempt-dot preempt-dot--c" aria-hidden="true"></i>C</span>
+                <span class="preempt-seq__meta"><code>output 1</code><span>state 21</span><span>1 块</span></span>
+                <span class="preempt-seq__tag">本轮处理 · +1 块</span>
+              </li>
+            </ol>
+          </div>
+        </div>
+
+        <p class="preempt-section__foot"><strong>A 只是候选。</strong>只有空闲不足 1 块时，A 才会在本次迭代被选中为 victim；C 已有 <code>#6</code>，本轮仍需追加 <code>1</code> 块。</p>
+      </section>
+
+      <section class="preempt-section" aria-labelledby="preempt-fork-title">
+        <div class="preempt-section__head">
+          <span class="preempt-step" aria-hidden="true">02</span>
+          <div class="preempt-section__copy">
+            <h4 id="preempt-fork-title">条件与路径：一条生效，一条保留完整结果</h4>
+            <p>条件只问一件事：处理 C 前，空闲池够不够 1 块？两条路径都写全，灰标的是本轮未执行的那条。</p>
+          </div>
+        </div>
+
+        <div class="preempt-gate" role="group" aria-label="本轮空间条件">
+          <div class="preempt-gate__cell">
+            <span class="preempt-gate__k">C 已有</span>
+            <strong class="preempt-gate__v"><span class="preempt-chip preempt-chip--c">#6</span></strong>
+            <span class="preempt-gate__n">1 块</span>
+          </div>
+          <div class="preempt-gate__cell">
+            <span class="preempt-gate__k">C 本轮追加</span>
+            <strong class="preempt-gate__v">+1 块</strong>
+            <span class="preempt-gate__n">仍差 1 块</span>
+          </div>
+          <div class="preempt-gate__cell">
+            <span class="preempt-gate__k">当前空闲池</span>
+            <strong class="preempt-gate__v" data-preempt-free-count>0 块</strong>
+            <span class="preempt-gate__n" data-preempt-free-note>默认：没有空闲块</span>
+          </div>
+          <div class="preempt-gate__cell preempt-gate__cell--verdict">
+            <span class="preempt-gate__k">判定</span>
+            <strong class="preempt-gate__v" data-preempt-verdict>victim 让路</strong>
+            <span class="preempt-badge preempt-badge--no" data-preempt-gate-badge>不成立 → victim</span>
+          </div>
+        </div>
+
+        <div class="preempt-paths">
+          <article class="preempt-path preempt-path--direct preempt-path--skipped" data-preempt-path="direct" aria-labelledby="preempt-path-direct-title">
+            <header class="preempt-path__head">
+              <div>
+                <p class="preempt-path__cond">条件 · 空闲池 ≥ 1</p>
+                <h5 id="preempt-path-direct-title">直达：不产生 victim</h5>
+              </div>
+              <span class="preempt-badge preempt-badge--skip" data-preempt-path-badge="direct">本轮未执行</span>
+            </header>
+            <p class="preempt-path__lede">C 直接取走 1 个空闲块，A、B 都不动。</p>
+            <dl class="preempt-path__facts">
+              <div><dt>动作</dt><dd>空闲块 <span class="preempt-chip preempt-chip--free">#7</span> → C</dd></div>
+              <div><dt>走这条的结果</dt><dd>C 为 <span class="preempt-chip preempt-chip--c">#6</span><span class="preempt-chip preempt-chip--c">#7</span>；空闲池 <strong>0</strong></dd></div>
+              <div><dt>A / B</dt><dd>保持 running；A: #12/#4/#8，B: #3/#9，state 都不动</dd></div>
+            </dl>
+            <p class="preempt-path__future"><strong>若走这条：</strong>A 本轮未被抢占；后续处理 B 的迭代仍可能空间不足而选中 A。本图不展开 B。</p>
+          </article>
+
+          <article class="preempt-path preempt-path--victim preempt-path--active" data-preempt-path="victim" aria-labelledby="preempt-path-victim-title">
+            <header class="preempt-path__head">
+              <div>
+                <p class="preempt-path__cond">条件 · 空闲池 = 0</p>
+                <h5 id="preempt-path-victim-title">victim：A 让出 3 块</h5>
+              </div>
+              <span class="preempt-badge preempt-badge--active" data-preempt-path-badge="victim">本轮生效</span>
+            </header>
+            <p class="preempt-path__lede">从 running 头端取 A；A 的处置由上方参数决定，终止与重算的完整结果都保留在下面。</p>
+            <div class="preempt-victim">
+              <span class="preempt-victim__role">victim</span>
+              <strong>A</strong>
+              <span class="preempt-victim__meta">output 12 · state 17 · 3 个 KV 块</span>
+            </div>
+            <div class="preempt-modes">
+              <div class="preempt-mode-row preempt-mode-row--active" data-preempt-mode-row="stop">
+                <div class="preempt-mode-row__head">
+                  <strong>终止</strong>
+                  <span class="preempt-badge preempt-badge--active" data-preempt-mode-badge="stop">本轮执行</span>
+                </div>
+                <p>标为 <code>FINISHED_PREEMPTED</code>；释放 MTP slot、state block 与 3 个 KV 块；退出 running，不再生成，也不回 WAITING。</p>
+              </div>
+              <div class="preempt-mode-row preempt-mode-row--skipped" data-preempt-mode-row="recompute">
+                <div class="preempt-mode-row__head">
+                  <strong>清状态重算</strong>
+                  <span class="preempt-badge preempt-badge--skip" data-preempt-mode-badge="recompute">未选</span>
+                </div>
+                <p>清 <code>cache.num_tokens</code>、在途计数、SWA 起点与 MTP 状态；保留已提交 token，回 WAITING 队头；释放 state block、MTP slot 与 3 个 KV 块，之后重新 prefill。旧轮若仍在途，回来因 WAITING 被丢弃，不能重复提交。</p>
+              </div>
+            </div>
+            <p class="preempt-path__result"><strong>块结果：</strong>A 的 <span class="preempt-chip preempt-chip--a">#12</span><span class="preempt-chip preempt-chip--a">#4</span><span class="preempt-chip preempt-chip--a">#8</span> → 空闲池；C 取 <span class="preempt-chip preempt-chip--c">#12</span>；空闲池剩 <span class="preempt-chip preempt-chip--free">#4</span><span class="preempt-chip preempt-chip--free">#8</span>（2 块）。</p>
+            <p class="preempt-path__future"><strong>若走这条：</strong>A 已退出 running（终止或 WAITING）；后续处理 B 不会再次选中 A。本图不展开 B。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="preempt-section preempt-section--ledger" aria-labelledby="preempt-ledger-title">
+        <div class="preempt-section__head">
+          <span class="preempt-step" aria-hidden="true">03</span>
+          <div class="preempt-section__copy">
+            <h4 id="preempt-ledger-title">块账本：前 → 后，只跟当前生效路径</h4>
+            <p>块号是教学编号；C 拿哪一块为对照固定（victim 分支取 #12，直达取 #7），真实分配由 CacheEngine 决定。另一条路径的块结果写在上方对应卡片里，不混进本表。</p>
+          </div>
+        </div>
+
+        <div class="preempt-balance" role="group" aria-label="当前生效路径的 KV 空闲块平衡">
+          <span class="preempt-balance__title">空闲块</span>
+          <span class="preempt-balance__num"><b data-preempt-balance-before>0</b><small>前</small></span>
+          <span class="preempt-balance__op" aria-hidden="true">+</span>
+          <span class="preempt-balance__term" data-preempt-balance-release>A 释放 <b>3</b></span>
+          <span class="preempt-balance__op" aria-hidden="true">−</span>
+          <span class="preempt-balance__term">C 取 <b>1</b></span>
+          <span class="preempt-balance__op" aria-hidden="true">=</span>
+          <span class="preempt-balance__num preempt-balance__num--end"><b data-preempt-balance-after>2</b><small>后</small></span>
+          <span class="preempt-balance__note" data-preempt-balance-note>C 取 #12；#4 #8 留池</span>
+        </div>
+
+        <div class="preempt-table-wrap">
+          <table class="preempt-table">
+            <caption class="preempt-sr-only">当前生效路径下，A、B、C 与空闲池的 KV 块前后对照</caption>
+            <thead>
+              <tr>
+                <th scope="col">对象</th>
+                <th scope="col">前</th>
+                <th scope="col">本轮块动作</th>
+                <th scope="col">后</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="preempt-table__row preempt-table__row--changed" data-preempt-ledger-row="A">
+                <th scope="row">
+                  <span class="preempt-table__obj"><i class="preempt-dot preempt-dot--a" aria-hidden="true"></i><strong>A</strong></span>
+                  <span class="preempt-table__state">state 17 · running</span>
+                </th>
+                <td data-label="前">
+                  <div class="preempt-chips"><span class="preempt-chip preempt-chip--a">#12</span><span class="preempt-chip preempt-chip--a">#4</span><span class="preempt-chip preempt-chip--a">#8</span></div>
+                  <span class="preempt-cellnote">3 个 KV 块</span>
+                </td>
+                <td data-label="本轮块动作" data-preempt-a-action>释放 #12/#4/#8 → 空闲池；C 取 #12</td>
+                <td data-label="后">
+                  <span class="preempt-badge preempt-badge--ended" data-preempt-a-after-badge>FINISHED_PREEMPTED</span>
+                  <div class="preempt-chips" data-preempt-a-after-blocks><span class="preempt-empty">— 无 KV 块</span></div>
+                  <span class="preempt-cellnote" data-preempt-a-after-note>state 17 释放；退出 running，不再生成</span>
+                </td>
+              </tr>
+              <tr class="preempt-table__row" data-preempt-ledger-row="B">
+                <th scope="row">
+                  <span class="preempt-table__obj"><i class="preempt-dot preempt-dot--b" aria-hidden="true"></i><strong>B</strong></span>
+                  <span class="preempt-table__state">state 12 · running</span>
+                </th>
+                <td data-label="前">
+                  <div class="preempt-chips"><span class="preempt-chip preempt-chip--b">#3</span><span class="preempt-chip preempt-chip--b">#9</span></div>
+                  <span class="preempt-cellnote">2 个 KV 块</span>
+                </td>
+                <td data-label="本轮块动作">不动</td>
+                <td data-label="后">
+                  <span class="preempt-badge preempt-badge--run">running</span>
+                  <div class="preempt-chips"><span class="preempt-chip preempt-chip--b">#3</span><span class="preempt-chip preempt-chip--b">#9</span></div>
+                  <span class="preempt-cellnote" data-preempt-b-after-note>A 已不在 running；后续 B 不会再次选中 A</span>
+                </td>
+              </tr>
+              <tr class="preempt-table__row preempt-table__row--changed" data-preempt-ledger-row="C">
+                <th scope="row">
+                  <span class="preempt-table__obj"><i class="preempt-dot preempt-dot--c" aria-hidden="true"></i><strong>C</strong></span>
+                  <span class="preempt-table__state">state 21 · running</span>
+                </th>
+                <td data-label="前">
+                  <div class="preempt-chips"><span class="preempt-chip preempt-chip--c">#6</span></div>
+                  <span class="preempt-cellnote">1 个 KV 块</span>
+                </td>
+                <td data-label="本轮块动作" data-preempt-c-action>从 A 释放的块中取 #12</td>
+                <td data-label="后">
+                  <span class="preempt-badge preempt-badge--run">RUNNING · 本迭代</span>
+                  <div class="preempt-chips" data-preempt-c-after-blocks><span class="preempt-chip preempt-chip--c">#6</span><span class="preempt-chip preempt-chip--c">#12</span></div>
+                  <span class="preempt-cellnote" data-preempt-c-after-note>本轮被选中；外层循环未结束</span>
+                </td>
+              </tr>
+              <tr class="preempt-table__row preempt-table__row--pool" data-preempt-ledger-row="pool">
+                <th scope="row">
+                  <span class="preempt-table__obj"><strong>空闲池</strong></span>
+                  <span class="preempt-table__state">本算例的当前快照</span>
+                </th>
+                <td data-label="前">
+                  <div data-preempt-pool-before>
+                    <div class="preempt-chips"><span class="preempt-empty">0 块</span></div>
+                    <span class="preempt-cellnote">默认无空闲</span>
+                  </div>
+                </td>
+                <td data-label="本轮块动作" data-preempt-pool-action>A 释放 3 块，C 取走 1 块</td>
+                <td data-label="后">
+                  <div data-preempt-pool-after>
+                    <div class="preempt-chips"><span class="preempt-chip preempt-chip--free">#4</span><span class="preempt-chip preempt-chip--free">#8</span><span class="preempt-cellnote">2 块</span></div>
+                    <span class="preempt-cellnote">#12 已归 C</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="preempt-section preempt-result" aria-labelledby="preempt-result-title">
+        <div class="preempt-result__main">
+          <div class="preempt-section__head">
+            <span class="preempt-step" aria-hidden="true">04</span>
+            <div class="preempt-section__copy">
+              <h4 id="preempt-result-title">本轮结论：只回答 C 的这次迭代</h4>
+              <p>默认状态已经完整铺开；切换上方参数只改高亮与数字，不播放动画。</p>
+            </div>
+          </div>
+          <p class="preempt-result__lead" data-preempt-result-lead>A 释放 <b>3</b> 块，C 用 <b>1</b> 块；空闲池 <b>0 → 2</b>。</p>
+          <dl class="preempt-result__list">
+            <div><dt>A</dt><dd data-preempt-result-a>终止：FINISHED_PREEMPTED；state 17 释放；退出 running，不再生成。</dd></div>
+            <div><dt>C</dt><dd data-preempt-result-c>已有 #6；本轮加 #12；这是 C 的这次迭代，外层 while 尚未结束。</dd></div>
+            <div><dt>接下来</dt><dd data-preempt-result-next>A 已不在 running → 后续处理 B 不会再次选中 A；B 的最终结果不在本图。</dd></div>
+          </dl>
+        </div>
+        <aside class="preempt-boundary" aria-label="范围与后续判定">
+          <p class="preempt-boundary__title">范围 / 后续判定</p>
+          <p>本图只到 C 的这次循环迭代；外层 <code>while</code> 继续处理余下 running（本算例接下来是 B），直到两端索引 <code>l == r</code>，不是整轮调度结果。</p>
+          <div class="preempt-follow">
+            <p class="preempt-follow__title">后续 B 会再选 A 吗？</p>
+            <div class="preempt-follow__row" data-preempt-follow="idle">
+              <span>A 本轮未被抢占 <small>空闲 ≥ 1</small></span>
+              <strong>仍可能</strong>
+              <small>A 还在 running</small>
+            </div>
+            <div class="preempt-follow__row preempt-follow__row--active" data-preempt-follow="preempted">
+              <span>A 本轮已被抢占 <small>空闲 = 0</small></span>
+              <strong>不会</strong>
+              <small>A 已移出 running（终止或 WAITING）</small>
+            </div>
+          </div>
+          <p class="preempt-boundary__note">空闲 1 块只对处理 C 的这次判定有效，不等于后续 B 也够用。两条规则按本轮 A 是否已被移出 running 区分，不会同时成立。</p>
+        </aside>
+      </section>
+    </div>
+
+    <footer class="preempt-foot">
+      <p><strong>编号与图例：</strong>A/B/C、state 17/12/21、块号 #12/#4/#8、#3/#9、#6、#7 在全图复用；块号、state_id 与“C 取哪一块”都是教学编号；KV/state 编号分配由 Scheduler/BlockManager 管理，CacheEngine 保存设备缓存张量。state block 与 MTP slot 不计入上面的 KV 块 0 + 3 − 1 = 2 账本。</p>
+      <p><strong>源码口径：</strong><code>scheduler.hpp:556–557</code> 的说明与 <code>:624–633</code> 的比较器/两端索引实现方向相反；本页按实现：尾端 C 先取，空闲不足时头端 A 作 victim。终止不回 WAITING；重算回 WAITING 队头，已提交 token 保留，旧轮在途返回时因 WAITING 被丢弃。</p>
+      <p class="preempt-foot__static">静态对照：无需播放；默认画面就是“无空闲 + 终止”的完整路径。</p>
+    </footer>
+  </div>
+</figure>
+
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="scheduler.hpp decode 排序源码">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/scheduler.hpp</span></div>
+              <span class="src-function">Scheduler::_schedule_decode()</span>
+            </div>
+            <div class="source-window__meta"><span>L624–633</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L624-L633" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>std::sort(running.begin(), running.end(),
+    [](const SequencePtr &amp;a, const SequencePtr &amp;b) { return a-&gt;get_output_len() &gt; b-&gt;get_output_len(); });
+scheduled.reserve(max_seqs);
+size_t l = 0, r = running.size();
+while (l &lt; r &amp;&amp; scheduled.size() &lt; max_seqs) {
+    auto &amp;seq = running[r - 1];
+    while (!block_manager-&gt;can_allocate_single_nolock() &amp;&amp; r - l &gt; 1) {
+        auto victim_seq = running[l];
+        _preempt(victim_seq, ignored_seqs);
+        l += 1;
+    }</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+          <article class="source-window" aria-label="scheduler.hpp 抢占源码">
+            <div class="source-window__bar">
+              <div><span class="source-dot" aria-hidden="true"></span><span class="src-file">csrc/engine/scheduler.hpp</span></div>
+              <span class="src-function">Scheduler::_preempt()</span>
+            </div>
+            <div class="source-window__meta"><span>L771–788</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L771-L788" target="_blank" rel="noopener noreferrer">打开固定行 ↗</a></div>
+            <pre><code>if (stop_preempted_request || so_blocks_recompute) {
+    if (so_blocks_recompute &amp;&amp; !stop_preempted_request) {
+        LOG_WARN("Request {} is preempted and stops: structured output (so_status {}) can not be recomputed.",
+            seq-&gt;request.request_id, seq-&gt;structured_output.status);
+    } else {
+        LOG_WARN("Request {} is preempted and stops.", seq-&gt;request.request_id);
+    }
+    seq-&gt;schedule.status = SequenceStatus::FINISHED_PREEMPTED;
+    free_seq_nolock(*seq);
+    ignored_seqs.push_back(seq);
+} else {
+    LOG_WARN("Request {} is preempted and will be recomputed.", seq-&gt;request.request_id);
+    seq-&gt;reset_for_recompute();
+    waiting.push_front(seq);
+    seq-&gt;schedule.status = SequenceStatus::WAITING;
+    free_seq_nolock(*seq);
+}</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 方向和状态</p>
+          <ol class="line-notes">
+            <li><b>L624–625</b><span><strong>降序是实现的锚点。</strong>输出长的在头端，短的尾端；不要被上一行的旧注释带走。</span></li>
+            <li><b>L629</b><span><strong>先从尾端执行。</strong><code>r - 1</code> 是当前最短输出请求；本算例先跑 C。</span></li>
+            <li><b>L630–633</b><span><strong>块不够才找 victim。</strong><code>running[l]</code> 是头端最长输出请求；本算例是 A。释放后继续尝试，而不是无条件执行。这里只是内层 victim 循环；外层 <code>while</code> 处理完当前尾端请求后还会继续，直到 <code>l == r</code>。</span></li>
+            <li><b>L771–780</b><span><strong>终止分支。</strong>状态置 <code>FINISHED_PREEMPTED</code>，释放资源，放进 ignored 输出；输出历史不会再推进。</span></li>
+            <li><b>L781–788</b><span><strong>重算分支。</strong><code>reset_for_recompute</code> 清运行 cache 状态；<code>waiting.push_front</code> 让它优先重来；释放旧占用。用户已提交的 token 历史仍在 Sequence 中。</span></li>
+          </ol>
+          <p class="source-bridge"><b>不是“删掉最长请求最省事”。</b>选择长输出端作为 victim 是这套比较器的结果，不等于所有实现或所有配置都这样；而且释放块与终止请求是两种不同代价。</p>
+          <p class="source-attrib">ZOS 在途输出被丢弃的条件见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L917-L924" target="_blank" rel="noopener noreferrer">scheduler.hpp:917–924</a>；重算复位见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/sequence.hpp#L307-L310" target="_blank" rel="noopener noreferrer">sequence.hpp:307–310</a>。</p>
+        </div>
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>抢占能让剩余请求继续推进，但不是免费显存：终止降低完成率，重算增加 prefill 计算和尾延迟。头部 victim 释放的块可能更多，代价是长请求的工作被丢弃或重做；应同时看完成吞吐、重算 token 数、抢占次数与尾延迟。</p>
+          <p class="perf-boundary">源码因果，不是本机测量。本页不做运行时泄漏或吞吐测试。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：取消请求后，为什么不能马上把它的全部 KV 块分给别人？</summary>
+          <div class="question__body"><p>取消先改终态，不一定在 cancel 调用里释放块；还要等调度清理、收尾和引用计数归零。若有 clone、共享块或在途旧轮，释放一次只减一层引用。下一单元用三盏灯和引用计数展开。</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <nav class="unit-turn" aria-label="单元导航">
+    <div class="wrap unit-turn__in">
+      <a href="index.html#route">
+        <small>回到总览</small>
+        <span><strong>阅读路线</strong><span class="micro-note" style="display:block">总览、术语与整机图谱</span></span>
+      </a>
+      <div class="unit-turn__mid"><span>01 / 05</span><i aria-hidden="true"></i><span>请求与调度</span></div>
+      <a class="unit-turn__next" href="runtime.html">
+        <small>NEXT / 02</small>
+        <span><strong>运行时与异步</strong><span class="micro-note" style="display:block">KV 页表、生命周期、ZOS 与 Graph</span></span>
+      </a>
+    </div>
+  </nav>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap site-footer__in">
+    <div>
+      <a class="brand brand--footer" href="index.html">
+        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/><path class="brand__cut" d="M5 19h30M18 8v24"/></svg>
+        <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+      </a>
+      <p>中文、面向初学者、可回到固定源码行号的 DeepInfer 教学站。</p>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="atlas.html">整机图谱</a>
+      <a href="index.html#glossary">术语</a>
+      <a href="index.html#resources">资料下载</a>
+      <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 ↗</a>
+    </div>
+    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-26 · 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
+  </div>
+</footer>
+</body>
+</html>

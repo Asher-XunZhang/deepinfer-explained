@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "model_repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+  "model_last_modified": "2026-10-17T05:46:55.000Z",
+  "retrieved_date": "2026-10-26",
+  "retrieved_date_timezone": "Asia/Shanghai",
+  "metadata_source_url": "https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/revision/1bae0e1088993b9b82de08f59de5be5a34e42170",
+  "tree_source_url": "https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4.1-Flash-1017/tree/1bae0e1088993b9b82de08f59de5be5a34e42170?recursive=true&expand=false",
+  "deepinfer_revision": "553741557a57df44a46fb3ab72b6aafeaf945337",
+  "selection_reason": "Matches DeepInfer examples/_config.py DEFAULT_MODEL_NAME. This directory preserves official configuration and licensing only; selected official model definitions are tracked separately in model-architecture/manifest.json.",
+  "download_allowlist": [
+    "config.json",
+    "inference/config.json",
+    "LICENSE"
+  ],
+  "downloaded_files": [
+    {
+      "path": "config.json",
+      "role": "official-model-structure-config",
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/resolve/1bae0e1088993b9b82de08f59de5be5a34e42170/config.json",
+      "source_browser_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/config.json",
+      "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+      "size_bytes": 3311,
+      "sha256": "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+      "git_blob_sha1": "09917a9139b22d5bf8be52132787f435147b1020"
+    },
+    {
+      "path": "inference/config.json",
+      "role": "official-model-structure-config",
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/resolve/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/config.json",
+      "source_browser_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/config.json",
+      "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+      "size_bytes": 1982,
+      "sha256": "2e84f45cf1dac8c7fcbb200e96667d4b913275690668ed496f24c7747207a809",
+      "git_blob_sha1": "7a915cc69e21abbc6d7fb939cef5d09c72aa0d24"
+    },
+    {
+      "path": "LICENSE",
+      "role": "upstream-license",
+      "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/resolve/1bae0e1088993b9b82de08f59de5be5a34e42170/LICENSE",
+      "source_browser_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/LICENSE",
+      "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+      "size_bytes": 1084,
+      "sha256": "f2c6c602815669d292889e5be8c802f2ed950653b77999b1584e8e6aed25d040",
+      "git_blob_sha1": "d62e3bef9f054f21b7fc616365850fbf879a99ff"
+    }
+  ],
+  "source_files_identified_but_not_downloaded": [
+    {
+      "path": "inference/kernel.py",
+      "size_bytes": 23790,
+      "git_blob_sha1": "6fa7bd5aafbe1bc62887080963cc9fdd838d89f5",
+      "source_browser_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/kernel.py"
+    }
+  ],
+  "excluded": {
+    "weight_shards": 48,
+    "weight_index": true,
+    "tokenizer_vocabularies": true,
+    "media": true,
+    "deepinfer_source": true
+  },
+  "verification": {
+    "size_matches_pinned_tree": true,
+    "git_blob_sha1_matches_pinned_tree": true,
+    "sha256_computed_after_download": true,
+    "json_configs_parse": true,
+    "snapshot_download_used": false
+  },
+  "license": "MIT; see LICENSE",
+  "additional_model_definition_reference_manifest": "../model-architecture/manifest.json"
+}
