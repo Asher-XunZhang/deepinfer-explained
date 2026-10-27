@@ -45,6 +45,7 @@
       <a href="model.html" aria-current="page">模型与注意力</a>
       <a href="sampling.html">采样与结构</a>
       <a href="performance.html">测量与效率</a>
+      <a href="production.html">生产恢复</a>
       <a href="atlas.html">整机图谱</a>
     </nav>
     <span class="header-status"><i aria-hidden="true"></i>章节 03</span>
@@ -467,7 +468,7 @@ for layer_id in range(args.n_mtp_layers):
           <button type="button" class="control control--reset" data-act="reset">重置</button>
           <span class="lab-beat" data-beat>事件 01 / 05</span>
         </div>
-        <p class="lab-foot"><b>事实边界：</b>三种模式都保留完整主 KV/index-K，但只有 compact 建立边界并走 <code>_store_yoco_full_kv</code> 的专门 full-hidden/metadata 支路；off 是普通 full 前向，mask 只限制 SWA 可见域。compact 真正减少 consumer query 行，mask 不减行；boundary 清理的是按新布局重建的 candidate 派生缓存，不是擦掉全部缓存。keep 不足时 C++ 会拒绝，本页滑块直接限制在合法范围。</p>
+        <p class="lab-foot"><b>事实边界：</b>三种模式都保留完整主 KV/index-K，但只有 compact 建立边界并走 <code>_store_yoco_full_kv</code> 的专门 full-hidden/metadata 支路；off 是普通 full 前向，mask 只限制 SWA 可见域。compact 真正减少 consumer query 行，mask 不减行；boundary 清理的是按新布局重建的 candidate 派生缓存，不是擦掉全部缓存。keep 不足时 C++ 会拒绝，本页滑块直接限制在合法范围。这里的 consumer 后缀重放与 encoder SWA 缺失恢复出口不同，见 <a href="production.html#replay">生产恢复页的两类重放</a>。</p>
         <div class="nojs-fallback nojs-only">
           <h4>无 JavaScript 回退：YOCO</h4>
           <ol>
@@ -774,7 +775,7 @@ self.logical_to_physical_map.copy_(next_logical_to_physical_map)</code></pre>
       <small>上一单元</small>
       <span><strong>运行时与异步</strong><span class="micro-note" style="display:block">KV 生命周期、ZOS 与 CUDA graph</span></span>
     </a>
-    <div class="unit-turn__mid"><span>03 / 05</span><i aria-hidden="true"></i><span>模型与注意力</span></div>
+    <div class="unit-turn__mid"><span>03 / 06</span><i aria-hidden="true"></i><span>模型与注意力</span></div>
     <a class="unit-turn__next" href="sampling.html">
       <small>NEXT / 04</small>
       <span><strong>采样与结构</strong><span class="micro-note" style="display:block">候选分布、DSpark 与结构约束</span></span>
@@ -798,6 +799,7 @@ self.logical_to_physical_map.copy_(next_logical_to_physical_map)</code></pre>
       <a href="model.html">模型与注意力</a>
       <a href="sampling.html">采样与结构</a>
       <a href="performance.html">测量与效率</a>
+      <a href="production.html">生产恢复</a>
       <a href="atlas.html">整机图谱</a>
       <a href="index.html#glossary">术语</a>
       <a href="index.html#resources">资料下载</a>

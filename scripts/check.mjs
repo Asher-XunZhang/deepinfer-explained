@@ -5,7 +5,7 @@ import { resolve, dirname, basename, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const requiredPages = ['index.html', 'scheduling.html', 'runtime.html', 'model.html', 'sampling.html', 'performance.html', 'atlas.html'];
+const requiredPages = ['index.html', 'scheduling.html', 'runtime.html', 'model.html', 'sampling.html', 'performance.html', 'production.html', 'atlas.html'];
 const requiredNav = requiredPages;
 const requiredAssets = ['assets/site.css', 'assets/site.js', 'assets/navigation.css', 'assets/favicon.svg'];
 const checkpoints = [];
@@ -98,7 +98,7 @@ for (const [name, html] of docs) {
   if (navMatch) {
     const navHrefs = [...navMatch[0].matchAll(/href="([^"]+)"/g)].map(m => m[1]);
     const missingNav = requiredNav.filter(href => !navHrefs.includes(href));
-    check(`${name}: primary nav links all seven pages`, missingNav.length === 0, missingNav.join(', '));
+    check(`${name}: primary nav links all eight pages`, missingNav.length === 0, missingNav.join(', '));
   }
   check(`${name}: navigation stylesheet loaded`, /href="assets\/navigation\.css"/.test(html));
 
@@ -156,7 +156,7 @@ for (const [name, html] of docs) {
 }
 
 const missingPages = requiredPages.filter(name => !docs.has(name));
-check('all seven pages present', missingPages.length === 0, missingPages.join(', '));
+check('all eight pages present', missingPages.length === 0, missingPages.join(', '));
 
 for (const { name, ok, detail } of checkpoints) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);

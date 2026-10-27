@@ -44,6 +44,7 @@
       <a href="model.html">模型与注意力</a>
       <a href="sampling.html">采样与结构</a>
       <a href="performance.html">测量与效率</a>
+      <a href="production.html">生产恢复</a>
       <a href="atlas.html">整机图谱</a>
     </nav>
     <span class="header-status"><i aria-hidden="true"></i>总览</span>
@@ -280,6 +281,7 @@
         <a href="model.html#parallel">MoE / 并行</a>
         <a href="sampling.html#sample">采样</a>
         <a href="performance.html#formula">MFU</a>
+        <a href="production.html#replay">生产恢复</a>
       </nav>
 
       <div class="static-atlas nojs-only">
@@ -295,7 +297,7 @@
             <tr><td>V4.1 模型 / kernel</td><td>attention、MoE 与后端计算库</td><td>hidden、cache 映射 → hidden / logits</td><td><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/models/deepseek.py#L154-L248" target="_blank" rel="noopener noreferrer">deepseek.py:154–248</a></td></tr>
           </tbody>
         </table></div>
-        <p class="micro-note">交互被关闭时，本页仍提供完整正文和固定源码链接；本表仅覆盖总览层。请求与调度、KV / 生命周期、异步 / Graph、模型、采样与测量均已接通，章节入口见阅读路线与全站导航。</p>
+        <p class="micro-note">交互被关闭时，本页仍提供完整正文和固定源码链接；本表仅覆盖总览层。请求与调度、KV / 生命周期、异步 / Graph、模型、采样、测量与生产恢复均已接通，章节入口见阅读路线与全站导航。</p>
       </div>
     </div>
   </section>
@@ -346,6 +348,11 @@
           <span class="route-no">07</span>
           <div><h3>怎样判断快，哪里不能说快</h3><p>MFU 的分子分母、GPU busy 与吞吐的区别，以及没有实测数字时的证据边界。</p></div>
           <span class="route-state route-state--live"><a href="performance.html#formula">进入 05</a></span>
+        </li>
+        <li>
+          <span class="route-no">08</span>
+          <div><h3>命中之后还要恢复什么</h3><p>Block KV 命中不等于 SWA 就绪；沿两类重放、三种角色与最后一次 flush，接到生产缓存恢复与条件化工作点。</p></div>
+          <span class="route-state route-state--live"><a href="production.html#replay">进入 06</a></span>
         </li>
       </ol>
     </div>
@@ -490,6 +497,7 @@
       <a href="model.html">模型与注意力</a>
       <a href="sampling.html">采样与结构</a>
       <a href="performance.html">测量与效率</a>
+      <a href="production.html">生产恢复</a>
       <a href="atlas.html">整机图谱</a>
       <a href="index.html#glossary">术语</a>
       <a href="index.html#resources">资料下载</a>

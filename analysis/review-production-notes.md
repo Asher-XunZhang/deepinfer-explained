@@ -42,7 +42,7 @@
 
 ZOS 基本顺序、DP/EP/EPLB 基础、YOCO 三模式、结构化输出、确定性条件和 τ 公式在本站已有覆盖。作者对框架演化版本、未开放原因等未确认推测不采用；经营规模、收入或内部服务指标不拿来证明本站机制的性能。
 
-本记录只确认可采纳材料与分析方法。对应规则已写入根目录 `AGENTS.md`；网页内容补充尚未实施。
+本记录的初次核验只确认可采纳材料与分析方法，对应规则已写入根目录 `AGENTS.md`。2026-10-27 后续按用户要求实施为 [生产恢复章节](../production.html)：请求与缓存路径、StateBlock 生命周期、两类重放、角色与 flush、官方图读法及 DSpark 工作点；具体教学依据见 [production-mechanisms.md](production-mechanisms.md)，验收范围见 [verification.md](verification.md)。
 
 [readme-scope]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/README.md#L38-L42
 [qa-scope]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L19-L35

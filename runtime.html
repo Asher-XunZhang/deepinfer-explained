@@ -45,6 +45,7 @@
       <a href="model.html">模型与注意力</a>
       <a href="sampling.html">采样与结构</a>
       <a href="performance.html">测量与效率</a>
+      <a href="production.html">生产恢复</a>
       <a href="atlas.html">整机图谱</a>
     </nav>
     <span class="header-status"><i aria-hidden="true"></i>章节 02</span>
@@ -403,7 +404,7 @@
         <div class="source-read">
           <p class="source-read__label">逐段读 / 不能用一个布尔值压缩</p>
           <p class="source-bridge"><b>为什么三盏灯必须分开：</b>第一盏是请求语义，第二盏是执行收尾，第三盏是内存所有权。只把第一盏点亮，会让“已结束”的请求继续占着 state 和块；只把第三盏当成第一盏，又会在旧轮还没消费结果时提前覆盖数据。</p>
-          <p class="source-bridge"><b>输出引用也是资源：</b><code>step()</code> 返回的 RequestOutput 由 pool 管理；跨 step 保留要 clone，离线入口在队列空时 flush 在途轮。把池中借用对象直接交给外部调用者，是把生命周期问题推迟成偶发数据损坏。</p>
+          <p class="source-bridge"><b>输出引用也是资源：</b><code>step()</code> 返回的 RequestOutput 由 pool 管理；跨 step 保留要 clone，离线入口在队列空时 flush 在途轮（完整收尾顺序见 <a href="production.html#roles">生产恢复的 flush 时间线</a>）。把池中借用对象直接交给外部调用者，是把生命周期问题推迟成偶发数据损坏。</p>
           <p class="source-attrib">源码事实来自固定 SHA；本页不复制完整文件。上游许可：<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a>。</p>
         </div>
       </div>
@@ -765,7 +766,7 @@
         <small>上一单元</small>
         <span><strong>请求与调度</strong><span class="micro-note" style="display:block">请求如何被批准，KV 紧了谁让路</span></span>
       </a>
-      <div class="unit-turn__mid"><span>02 / 05</span><i aria-hidden="true"></i><span>运行时与异步</span></div>
+      <div class="unit-turn__mid"><span>02 / 06</span><i aria-hidden="true"></i><span>运行时与异步</span></div>
       <a class="unit-turn__next" href="model.html">
         <small>NEXT / 03</small>
         <span><strong>模型与注意力</strong><span class="micro-note" style="display:block">40 层主干、共享 KV 与 MoE 并行</span></span>
@@ -790,6 +791,7 @@
       <a href="model.html">模型与注意力</a>
       <a href="sampling.html">采样与结构</a>
       <a href="performance.html">测量与效率</a>
+      <a href="production.html">生产恢复</a>
       <a href="atlas.html">整机图谱</a>
       <a href="index.html#glossary">术语</a>
       <a href="index.html#resources">资料下载</a>

@@ -1,0 +1,866 @@
+<!doctype html>
+<html lang="zh-CN" class="no-js">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>生产请求、缓存恢复与工作点 | DeepInfer 剖面</title>
+  <meta name="description" content="把 DeepInfer 引擎内部机制接到生产请求与缓存恢复：Entrypoint 路由、Scheduler 批次与 EPLB 专家放置三层控制权，StateBlock 的 stored/dropped 生命周期，encoder 与 decoder 两类有界重放，128/134/140 参数，EngineType 合法组合与 flush 收尾，以及官方吞吐图和 DSpark 六个离散工作点。固定 SHA，无 GPU 实测。">
+  <meta name="color-scheme" content="light">
+  <meta property="og:title" content="生产请求、缓存恢复与工作点 | DeepInfer 剖面">
+  <meta property="og:description" content="Block KV 命中之后，为什么还要重放？谁决定路由、批次和专家放置？为什么性能工作点不能泛化？">
+  <meta property="og:type" content="article">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/navigation.css">
+  <link rel="stylesheet" href="assets/production.css">
+  <script>document.documentElement.classList.remove('no-js');document.documentElement.classList.add('js');</script>
+  <script src="assets/production.js" defer></script>
+</head>
+<body class="unit-page production-page">
+<a class="skip-link" href="#main">跳到正文</a>
+<div class="version-bar">
+  <div class="wrap version-bar__in">
+    <span>固定源码 <code>5537415</code></span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>分析日期 2026-10-27</span>
+    <span class="version-bar__sep" aria-hidden="true"></span>
+    <span>静态源码阅读，无 GPU 实测</span>
+    <a href="index.html#boundary">证据边界</a>
+  </div>
+</div>
+
+<header class="site-header">
+  <div class="wrap site-header__in">
+    <a class="brand" href="index.html" aria-label="DeepInfer 剖面首页">
+      <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true">
+        <path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/>
+        <path class="brand__cut" d="M5 19h30M18 8v24"/>
+      </svg>
+      <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+    </a>
+    <nav class="primary-nav" aria-label="全站导航">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="production.html" aria-current="page">生产恢复</a>
+      <a href="atlas.html">整机图谱</a>
+    </nav>
+    <span class="header-status"><i aria-hidden="true"></i>章节 06</span>
+  </div>
+</header>
+
+<div class="unit-ribbon">
+  <div class="wrap unit-ribbon__in">
+    <span class="unit-ribbon__label">PRODUCTION / 06</span>
+    <nav aria-label="本页内容">
+      <a href="#path">生产路径</a>
+      <a href="#state">状态生命周期</a>
+      <a href="#replay">两类重放</a>
+      <a href="#roles">角色与收尾</a>
+      <a href="#points">性能工作点</a>
+    </nav>
+    <span class="unit-ribbon__note">固定 SHA · 官方生产描述与公开实现分开</span>
+  </div>
+</div>
+
+<main id="main">
+  <section class="unit-hero" aria-labelledby="unit-title">
+    <div class="wrap">
+      <p class="eyebrow"><span class="eyebrow__rule"></span>生产边界 · 请求 / 缓存 / 恢复 / PRODUCTION PATH</p>
+      <div class="unit-hero__grid">
+        <div>
+          <h1 id="unit-title">命中之后，<br><span>还要回答四个问题。</span></h1>
+          <p class="unit-hero__lede">一条生产请求先经过 Recipe 编码、Entrypoint 的缓存匹配与路由，再进入 Prefill 或 Decode。Block KV 命中只说明一段前缀块可以复用，不自动等于“所有继续计算所需的状态都齐了”。本页把引擎内部的批次、KV 与异步尾部，接到生产请求、StateBlock 保存和两类重放上；最后说明为什么官方吞吐图上的某个工作点，不能直接搬到另一套配置。</p>
+          <dl class="unit-hero__facts" aria-label="本页阅读信息">
+            <div><dt>三层控制</dt><dd>入口路由 / Scheduler 批次 / EPLB 放置</dd></div>
+            <div><dt>三个数字</dt><dd>128 窗口 / 134 回退配置 / 140 推荐保留</dd></div>
+            <div><dt>两类重放</dt><dd>encoder SWA 恢复 / consumer 有界重放</dd></div>
+          </dl>
+        </div>
+        <aside class="unit-map" aria-labelledby="unit-map-title">
+          <div class="unit-map__head"><span id="unit-map-title">本页地图</span><span>点击直达</span></div>
+          <ol>
+            <li><a href="#path"><span class="num">01</span><span><strong>一条请求跨过哪些边界</strong><small>Recipe、Entrypoint、P/D 与三层控制权</small></span><span class="unit-map__state">路径图</span></a></li>
+            <li><a href="#state"><span class="num">02</span><span><strong>StateBlock 的三种生命周期</strong><small>请求内、P→D、跨请求保存</small></span><span class="unit-map__state">对象账</span></a></li>
+            <li><a href="#replay"><span class="num">03</span><span><strong>两类重放与三个数字</strong><small>128 / 134 / 140 各自是什么</small></span><span class="unit-map__state">可调对照</span></a></li>
+            <li><a href="#roles"><span class="num">04</span><span><strong>角色组合与最后 flush</strong><small>COMPLETION 为什么不能重算</small></span><span class="unit-map__state">时间线</span></a></li>
+            <li><a href="#points"><span class="num">05</span><span><strong>官方图与六个工作点</strong><small>坐标、条件、离散读数</small></span><span class="unit-map__state">读图</span></a></li>
+          </ol>
+          <p class="unit-map__foot">源码事实、官方生产描述、教学算例与官方 benchmark 估算分别标注；本页没有 GPU 运行数据。</p>
+        </aside>
+      </div>
+      <div class="unit-contract">
+        <span>读完之后，你应该能回答</span>
+        <ul>
+          <li>为什么 Block KV 命中后仍可能重放，重放只重建了什么</li>
+          <li>encoder SWA 缺失恢复与 consumer/decoder 有界重放，出口有什么不同</li>
+          <li>入口 LB、Scheduler 和 EPLB 各自决定哪类对象，为什么不能画成一个调度器</li>
+          <li>为什么“没有待调度请求”不等于“结果都已交付”</li>
+          <li>为什么 DSpark 的 16 并发负收益不能被归因于单一因素，官方收益也不能改写成普遍加速比</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <noscript>
+    <div class="wrap">
+      <p class="unit-noscript"><strong>JavaScript 已关闭。</strong>正文、静态图、官方数值表和源码链接都可阅读；可调重放对照会隐藏。默认教学算例的数值已写在图的回退文字与表格中。</p>
+    </div>
+  </noscript>
+
+  <section class="prod-purpose-band" id="why" aria-labelledby="why-title">
+    <div class="wrap">
+      <div class="prod-purpose-band__head">
+        <strong id="why-title">先看用途 / 四个问题各对应一条机制</strong>
+        <span>不先展开推导；点卡片进入对应证据</span>
+      </div>
+      <div class="prod-purpose">
+        <a href="#state">
+          <span>问题 1 · 缓存</span>
+          <strong>命中为什么还要重放？</strong>
+          <p>Block KV 与 SWA state 是不同对象；<b>命中前缀块</b>不等于<b>继续生成所需状态</b>已就绪。</p>
+        </a>
+        <a href="#replay">
+          <span>问题 2 · 恢复</span>
+          <strong>两类重放各修什么？</strong>
+          <p>encoder 缺 SWA 时只在命中区内重建末尾窗口；consumer 只为 Decode 准备后缀状态，<b>出口不同</b>。</p>
+        </a>
+        <a href="#path">
+          <span>问题 3 · 控制</span>
+          <strong>谁决定请求去哪？</strong>
+          <p>入口 LB 选实例/rank，Scheduler 选批次/预算，EPLB 搬专家副本；<b>三层</b>。</p>
+        </a>
+        <a href="#points">
+          <span>问题 4 · 性能</span>
+          <strong>为什么不能泛化？</strong>
+          <p>坐标、配置、并发和计数口径不同；16 并发的官方点是<b>负收益</b>，其余五个为正。</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="mech mech-first" id="path" aria-labelledby="path-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M13</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--deploy">官方生产描述</span><span class="tag tag--source">公开实现边界</span><span class="mech-time">约 7 分钟 · 外层路径</span></div>
+          <h2 id="path-title">一条请求跨过四层边界，三个“调度器”各管一件事</h2>
+          <p class="mech-thesis">推理引擎内部的 batch 调度，不是整个集群的资源调度。Recipe 负责 API 协议与 token 序列之间的编码/解码；Entrypoint 先做缓存匹配、再路由；P/D 执行不同阶段，图片请求另由 P 机器选择 VE 取 embedding。入口 LB、引擎 Scheduler 与 EPLB 分别处理<strong>实例/rank、本轮序列与预算、专家物理放置</strong>。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>读者问题</dt><dd>为什么有推理引擎还需要路由、编码和缓存服务？</dd></div>
+          <div><dt>关键对象</dt><dd>请求、命中长度、实例、batch、专家槽</dd></div>
+          <div><dt>证据等级</dt><dd>生产部署描述；外部 KV 服务不随本次发布完整提供</dd></div>
+        </dl>
+      </header>
+
+      <div class="mech-facts">
+        <div><dt>输入</dt><dd>API 请求、图片或文本 prompt、模型版本</dd></div>
+        <div><dt>先发生</dt><dd>编码与缓存元数据匹配；命中长度在路由前得到</dd></div>
+        <div><dt>再发生</dt><dd>选实例/rank，拉取并搬入 KV，P 前向，D 继续生成</dd></div>
+        <div><dt>不要混淆</dt><dd>匹配、fetch、swap-in、forward 是不同工作与不同进程</dd></div>
+      </div>
+
+      <div class="prod-map" aria-label="生产请求与缓存数据流示意，两条轨道在 J1、J2 相交">
+        <div class="prod-map__head">
+          <div><strong>请求一条轨，缓存一条轨；只在 J1 / J2 相交</strong><span>实线框 = 本次发布中的核心能力；虚线框 = 官方生产描述或仓外组件</span></div>
+          <span class="tag tag--deploy">非公开引擎默认轨迹</span>
+        </div>
+        <div class="prod-legend" aria-label="线型与框型图例">
+          <span><i class="prod-legend__line" aria-hidden="true"></i>实线箭头：请求 / 执行顺序</span>
+          <span><i class="prod-legend__line prod-legend__line--dash" aria-hidden="true"></i>虚线箭头：缓存查询 / 数据供应</span>
+          <span><i class="prod-legend__box" aria-hidden="true"></i>实线框：公开实现</span>
+          <span><i class="prod-legend__box prod-legend__box--dash" aria-hidden="true"></i>虚线框：生产外层</span>
+          <span><b class="prod-join">J1</b><b class="prod-join">J2</b> 两条轨的接点</span>
+        </div>
+        <div class="prod-arch">
+          <div class="prod-arch__lane prod-arch__lane--request">
+            <div class="prod-arch__label"><span>请求 / CONTROL</span><strong>先编码与路由，再执行</strong><small>请求真正经过的顺序</small></div>
+            <div class="prod-arch__flow prod-arch__flow--request">
+              <div class="prod-node prod-node--deploy"><span class="prod-node__k">外部</span><strong>API 请求</strong><small>Chat / Responses / Messages</small></div>
+              <span class="prod-arrow" aria-hidden="true"></span>
+              <div class="prod-node prod-node--deploy"><span class="prod-node__k">独立项目</span><strong>Recipe</strong><small>协议 ↔ token 序列；不是引擎 kernel</small></div>
+              <span class="prod-arrow" aria-hidden="true"></span>
+              <div class="prod-node prod-node--deploy"><span class="prod-node__k">Entrypoint <b class="prod-join">J1</b></span><strong>匹配 + 路由</strong><small>先查元数据得到命中长度，再选实例/rank</small><em>命中长度不能事后补</em></div>
+              <span class="prod-arrow" aria-hidden="true"></span>
+              <div class="prod-node prod-node--compute"><span class="prod-node__k">P / Prefill <b class="prod-join">J2</b></span><strong>处理未命中后缀</strong><small>从 HBM 读取已装入的 KV/state；产出新 KV</small><em>VE 只服务图片请求，见下方支路</em></div>
+              <span class="prod-handoff" aria-hidden="true"><b>P→D</b><small>KV / state</small></span>
+              <div class="prod-node prod-node--compute"><span class="prod-node__k">D / Decode</span><strong>逐轮生成</strong><small>读 cache、过模型、采样、更新账本</small><em>每轮由引擎 Scheduler 选</em></div>
+              <span class="prod-arrow" aria-hidden="true"></span>
+              <div class="prod-node prod-node--source"><span class="prod-node__k">输出</span><strong>RequestOutput</strong><small>入口归并后按协议转回流式事件</small></div>
+            </div>
+          </div>
+          <div class="prod-branch prod-branch--ve">
+            <div class="prod-branch__copy">
+              <span class="tag tag--deploy">仅图片 · 数据依赖</span>
+              <p><strong>P / Prefill 机器选择 VE 机器</strong>；VE 处理图片，并把 embedding 返回 P。调度者是 P 机器，不是 Recipe。</p>
+              <small>Recipe 只做协议 ↔ token 序列编码；这里不是 <code>Recipe → VE → P</code> 的调用 / 路由顺序。纯文本请求不经过 VE。</small>
+            </div>
+            <div class="prod-branch__flow" aria-hidden="true">
+              <span class="prod-ve-node"><b>P / Prefill</b><small>选择 VE 机器</small></span>
+              <span class="prod-ve-exchange"><b>选择 / 请求 →</b><b>← 返回 embedding</b></span>
+              <span class="prod-ve-node"><b>VE</b><small>处理图片嵌入</small></span>
+            </div>
+          </div>
+          <div class="prod-arch__lane prod-arch__lane--cache" aria-label="缓存轨：Block KV 与 stored SWA 是两种不同来源">
+            <div class="prod-arch__label"><span>缓存 / DATA</span><strong>两种来源，分别进入 HBM</strong><small>先匹配定位，再按对象取数；不是一条串联链</small></div>
+            <div class="prod-cache">
+              <div class="prod-cache__match">
+                <span class="prod-join">J1</span>
+                <p><strong>Entrypoint 元数据匹配</strong><small>先于路由：返回 Block KV 命中长度，并定位 stored SWA 副本位置。</small></p>
+              </div>
+              <div class="prod-cache__route prod-cache__route--kv">
+                <div class="prod-cache__route-head">
+                  <span>A · Block KV</span><strong>独立 3FS</strong><small>main KV + indexer K；不包含 SWA</small>
+                </div>
+                <div class="prod-cache__steps">
+                  <div class="prod-node prod-node--store"><span class="prod-node__k">存储</span><strong>3FS Block KV</strong><small>独立存储集群</small></div>
+                  <span class="prod-arrow prod-arrow--dep" data-label="fetch" aria-hidden="true"></span>
+                  <div class="prod-node prod-node--deploy"><span class="prod-node__k">主机</span><strong>共享内存</strong><small>fetch 的落点；还不是 HBM</small></div>
+                  <span class="prod-arrow prod-arrow--dep" data-label="swap-in" aria-hidden="true"></span>
+                  <div class="prod-node prod-node--source"><span class="prod-node__k">设备</span><strong>HBM Block KV</strong><small>P/D forward 读取</small></div>
+                </div>
+              </div>
+              <div class="prod-cache__route prod-cache__route--swa">
+                <div class="prod-cache__route-head">
+                  <span>B · stored SWA</span><strong>产出机主机内存</strong><small>stored 区保存副本；不是 3FS</small>
+                </div>
+                <div class="prod-cache__steps">
+                  <div class="prod-node prod-node--deploy"><span class="prod-node__k">保存位置</span><strong>产出机主机内存</strong><small>StateBlock stored 区</small></div>
+                  <span class="prod-arrow prod-arrow--dep prod-arrow--pull" data-label="目录查找 / 必要时远端拉回" aria-hidden="true"></span>
+                  <div class="prod-node prod-node--source"><span class="prod-node__k">设备</span><strong>HBM stored SWA</strong><small>继续处理所需的 state</small></div>
+                </div>
+                <div class="prod-cache__fallback">
+                  <span class="prod-cache__only">仅 SWA 缺失</span>
+                  <p><strong>才转恢复路径：</strong>在 Block KV 命中区末尾回退 128 窗口，重建 encoder SWA；Block KV 原样复用，不重算，也不从 3FS 取 SWA。</p>
+                </div>
+              </div>
+              <div class="prod-cache__read">
+                <span class="prod-join">J2</span>
+                <p><strong>P/D forward 从 HBM 读取</strong><small>Block KV 与 SWA state 是两类对象，是否可用要分别判断。</small></p>
+              </div>
+            </div>
+          </div>
+          <div class="prod-arch__controls">
+            <div class="prod-control-node"><span>C1 · 引擎内</span><strong>Scheduler</strong><p>选本轮序列、chunk 与 token 预算；不选集群实例，也不搬专家。</p></div>
+            <div class="prod-control-node"><span>C2 · 模型并行</span><strong>EPLB</strong><p>逻辑专家 → 物理 GPU/槽位，并决定冗余副本；不决定单个请求去向。</p></div>
+            <p class="prod-arch__controls-note"><b>控制不在请求链上：</b>Scheduler 决定“这一轮跑什么”，EPLB 决定“专家放在哪”。把它们画成请求前后的步骤，会制造假串行。</p>
+          </div>
+        </div>
+        <div class="prod-map__foot">
+          <span><b>读图顺序：</b>请求轨是“编码 → 路由 → P → D → 输出”；缓存轨在 J1 后分成两条来源：A Block KV 走 3FS → 主机共享内存 → swap-in → HBM，B stored SWA 走产出机主机内存 → 目录查找 / 必要时远端拉回 → HBM。只有 SWA 缺失才转末尾 128 的恢复路径。J2 是 P/D 读取 HBM 的接点。</span>
+          <span><b>不是所有箭头都是网络流：</b>匹配查元数据；fetch 到主机共享内存，swap-in 到 HBM；3FS 不是 P 的上一步，也不是 stored SWA 的来源。图片 VE 由 P 机器调度，不是 Recipe → VE → P 的调用顺序。overlap 是目标，不是免费。</span>
+        </div>
+      </div>
+
+      <div class="prod-controls">
+        <div class="prod-control">
+          <span>控制层 1</span>
+          <strong>入口 LB / Entrypoint</strong>
+          <p>决定请求去哪个实例或 rank；缓存匹配结果参与路由。</p>
+          <p><b>不负责：</b>本轮 batch 的具体序列、专家副本放在哪张卡。</p>
+        </div>
+        <div class="prod-control">
+          <span>控制层 2</span>
+          <strong>引擎 Scheduler</strong>
+          <p>决定本轮哪些序列上设备、prefill/decode 步型、chunk 与 token 预算。</p>
+          <p><b>不负责：</b>跨实例路由，也不搬专家权重。</p>
+        </div>
+        <div class="prod-control">
+          <span>控制层 3</span>
+          <strong>EPLB</strong>
+          <p>根据历史负载把逻辑专家映射到物理 GPU/槽位，并决定冗余副本。</p>
+          <p><b>不负责：</b>单个请求的去向或本轮 batch。</p>
+        </div>
+      </div>
+
+      <div class="prod-callout prod-callout--violet">
+        <b>公开实现边界：</b>本次发布提供核心计算、调度、缓存布局与若干扩展点。<code>init_pd_split</code>、<code>do_save_kvcache</code> 等虚函数不是完整外部服务；<code>should_copy_state</code> 基类返回 <code>False</code>。完整 KV 服务、VE/P/D 分离和跨 DP 副本 LB 属于官方生产描述，不能把 Q&amp;A 里的架构画成公开引擎默认执行轨迹。
+      </div>
+
+      <p class="source-attrib">路径与缓存服务描述见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L19-L39" target="_blank" rel="noopener noreferrer">Q&amp;A:19–39</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L107-L123" target="_blank" rel="noopener noreferrer">Q&amp;A:107–123</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L129-L159" target="_blank" rel="noopener noreferrer">Q&amp;A:129–159</a>；扩展点见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/llm_engine.py#L800-L822" target="_blank" rel="noopener noreferrer">llm_engine.py:800–822</a>。</p>
+    </div>
+  </section>
+
+  <section class="mech" id="state" aria-labelledby="state-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M14</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码布局</span><span class="tag tag--deploy">官方保存策略</span><span class="mech-time">约 7 分钟 · 对象与生命周期</span></div>
+          <h2 id="state-title">stored / dropped 是保存范围，不是“磁盘 / 内存”</h2>
+          <p class="mech-thesis">Block KV 命中只覆盖主 KV 与 indexer K。继续生成还依赖每请求的 SWA 与压缩状态；它们住在 StateBlock 的 stored 与 dropped 两个区。两区都会被 P→D 交接，但跨请求保存只取 stored 区。同一个 state，在“正在使用的 HBM 张量”“P→D 副本”“主机保存副本”里是<strong>三种生命周期</strong>。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>读者问题</dt><dd>为什么已有长前缀，还要重建 SWA？</dd></div>
+          <div><dt>关键分裂</dt><dd>stored SWA / dropped consumer SWA + 压缩累加器</dd></div>
+          <div><dt>易误读</dt><dd><code>state_size_to_disk</code> 只是大小字段，不证明介质</dd></div>
+        </dl>
+      </header>
+
+      <div class="stateblock" aria-label="StateBlock 分区示意，不按字节比例">
+        <div class="stateblock__head"><span><b>StateBlock</b> · 一个序列一个固定大小 slot</span><span>示意布局，不按真实字节比例</span></div>
+        <div class="stateblock__bar">
+          <div class="stateblock__region stateblock__region--stored">
+            <span>stored region</span>
+            <strong>SWA（需要跨请求保存的部分）</strong>
+            <small>P→D 交接；跨请求保存时进入产出机主机内存。这里不是“磁盘区”。</small>
+          </div>
+          <div class="stateblock__region stateblock__region--dropped">
+            <span>dropped region</span>
+            <strong>consumer SWA + 压缩边界累加器</strong>
+            <small>运行时仍需要，P→D 也要交接；但不随 stored SWA 一起保存。<em>consumer 依赖重放；压缩边界对齐到保存粒度。</em></small>
+          </div>
+        </div>
+        <p class="stateblock__foot">官方描述：V4.1 的 stored 层是前 20 层；consumer SWA 的恢复依赖 prefill 重算。源码中的 <code>KVSTORE_GRAIN = 128</code> 只说明保存/查询粒度，不等于整个物理 StateBlock ring 只有 128 长度。</p>
+      </div>
+
+      <div class="table-scroll">
+        <table class="prod-table" aria-label="Block KV 与 StateBlock 的三种生命周期">
+          <thead><tr><th scope="col">对象</th><th scope="col">请求执行期间</th><th scope="col">P→D 交接</th><th scope="col">跨请求保存 / 恢复（官方描述）</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Block KV</strong><br><small>main KV + indexer K</small></td>
+              <td>分页 HBM；逻辑位置经 block table 落到物理块。</td>
+              <td>交接相关 KV；与 SWA 共用 P→D 路径。</td>
+              <td>独立 3FS 存储集群；不受某台计算节点的 SWA 副本丢失直接影响。</td>
+            </tr>
+            <tr>
+              <td><strong>stored SWA</strong></td>
+              <td>StateBlock 的 stored 区，占一个 state 槽。</td>
+              <td>与 dropped 区一起交接。</td>
+              <td>产出机主机内存；Entrypoint 的分片内存目录记录位置，跨机命中可远端拉回。</td>
+            </tr>
+            <tr>
+              <td><strong>consumer SWA + 压缩边界累加器</strong></td>
+              <td>StateBlock 的 dropped 区；执行仍需要。</td>
+              <td>同样必须交接。</td>
+              <td>不随 stored SWA 保存；consumer 依赖 prefill 重放；压缩边界对齐使累加器没有跨保存边界依赖。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="gates" aria-label="SWA 保存与命中检查点">
+        <div class="gate"><span>GATE 01 · 128</span><strong>只在 128 的倍数挂接</strong><p>保存/查询粒度是 128 token；这与“SWA 窗口 128”相关但不是同一个命名空间。</p></div>
+        <div class="gate"><span>GATE 02 · 最后一个 chunk</span><strong>Prefill 只存最后 chunk</strong><p>分块 prefill 中途不保存；末尾先保留 1 个 token，再向下对齐到 128 倍数。</p></div>
+        <div class="gate"><span>GATE 03 · 不足一块</span><strong>不足一个完整 128 单位则不保存</strong><p>没有完整单位时，本次不产生可挂接的保存点；不能凭 134 或 140 推一个负位置。</p></div>
+        <div class="gate"><span>GATE 04 · Decode</span><strong>跨 128 边界复制到 replica</strong><p>结束时取最近完成的设备内副本；主机副本缺失，不等于 Block KV 也缺失。</p></div>
+      </div>
+
+      <div class="prod-callout prod-callout--teal">
+        <b>三个生命周期不要合并：</b>stored/dropped 是保存范围；P→D 传输的是“这次交接需要的两份 state”；跨请求保存的是主机上的副本。字段名、目录名或“已保存”标签都不能单独证明某个字节在磁盘上。
+      </div>
+
+      <p class="source-attrib">布局与保存范围见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cache_engine.py#L221-L306" target="_blank" rel="noopener noreferrer">cache_engine.py:221–306</a>；官方保存策略与介质见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L129-L177" target="_blank" rel="noopener noreferrer">Q&amp;A:129–177</a>。官方示例的 20 层 × 134 token × 528 B = 1,415,040 B / 序列属于该快照的 V4.1 配置，不是所有模型常量。</p>
+    </div>
+  </section>
+
+  <section class="mech" id="replay" aria-labelledby="replay-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M15</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--sim">教学算例</span><span class="mech-time">约 9 分钟 · 两类重放 + 可调对照</span></div>
+          <h2 id="replay-title">都叫“重放”，修的却不是同一个对象</h2>
+          <p class="mech-thesis">encoder SWA 缺失恢复，是在 Block KV 命中后补齐继续处理所需的 encoder SWA；decoder/consumer 有界重放，是在 CED/YOCO 路径里只为 Decode 准备 consumer SWA。前者回到“已命中的前缀尾段”，后者只处理提示词末尾的有限后缀；<strong>consumer SWA 不进跨请求前缀存储</strong>。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>共同点</dt><dd>都只重算有限窗口，复用已有 Block KV</dd></div>
+          <div><dt>不同点</dt><dd>重建对象、触发条件、结果去哪</dd></div>
+          <div><dt>近似边界</dt><dd>不是与完整上下文逐位等价</dd></div>
+        </dl>
+      </header>
+
+      <div class="replay-pair">
+        <article class="replay-card replay-card--encoder">
+          <span class="tag tag--source">重放 A · encoder SWA 缺失恢复</span>
+          <h3>Block KV 命中，但 SWA 不在</h3>
+          <p>命中长度先由 Block KV 给出，再检查对应 SWA。若缺失，Block KV 命中范围不变：整段仍复用；只取命中区间末尾 128 token 的 SWA 窗口重建，已命中的 Block KV <b>原样复用，不重算、不覆盖</b>。</p>
+          <dl>
+            <div><dt>触发</dt><dd>Block KV 命中，但相应 SWA 不可用。</dd></div>
+            <div><dt>重算</dt><dd>只在已命中范围内重放末尾 128 token 的 encoder SWA，与新 suffix 一起前向。</dd></div>
+            <div><dt>结果</dt><dd>得到继续处理所需的 encoder SWA；整段原 Block KV 保留。</dd></div>
+            <div><dt>可见域</dt><dd>位置 <code>i</code> 的 SWA 只看 <code>[max(s, i−127), i]</code>，<code>s</code> 是重放起点。</dd></div>
+          </dl>
+          <div class="prod-callout"><b>近似：</b>截断的是 SWA 可见域，不是“把所有 attention 输入截掉”。保留前缀 Block KV 也不代表数值与全量 SWA 逐位相同。</div>
+        </article>
+        <article class="replay-card replay-card--consumer">
+          <span class="tag tag--deploy">重放 B · decoder / consumer 有界重放</span>
+          <h3>只为 Decode 准备 consumer SWA</h3>
+          <p>CED/YOCO 路径只在 encoder 层做完整 Prefill；consumer 的 Block KV 来自 encoder hidden 的投影。Decode 还需要 consumer SWA，于是只处理提示词末尾有限后缀，不跑全长 consumer Prefill。</p>
+          <dl>
+            <div><dt>触发</dt><dd>需要给 Decode 准备 consumer state，而不想全量重算 consumer 层。</dd></div>
+            <div><dt>重算</dt><dd>只处理末尾有限后缀；具体保留长度受窗口与回退约束。</dd></div>
+            <div><dt>结果</dt><dd>供 Decode 使用；consumer SWA 不进入跨请求前缀存储。</dd></div>
+            <div><dt>公开推荐</dt><dd>README 为默认 V4.1 建议 <code>compact + keep_tokens=140</code>；这是推荐配置，不是 134 的新名字。</dd></div>
+          </dl>
+          <div class="prod-callout prod-callout--violet"><b>不要拿前者的“回退 128”套到后者：</b>consumer 的“140”是推荐保留后缀长度，不是一个跨所有配置的复制常数。</div>
+        </article>
+      </div>
+
+      <div class="num-cards">
+        <div class="num-card num-card--128">
+          <span>窗口 / 粒度</span><strong>128</strong>
+          <p><b>SWA 窗口</b>与<b>保存/查询粒度</b>都出现 128，但含义不同。</p>
+          <p>保存只挂在 128 倍数；命中回退也以一个 128 窗口为单位。不能因为都写 128 就把两者合并。</p>
+        </div>
+        <div class="num-card num-card--134">
+          <span>默认推理 ring</span><strong>134</strong>
+          <p><b>128 + 6</b>：128 是 SWA 窗口，6 是 max backtracking；inference ring 已经是“窗口 + 最大回退”，不是 134 之外再加 backtracking。</p>
+          <p>134 不是所有运行配置的常量；kvstore ring 还可再叠加 extra-state。命中上限按 <code>L − 134</code> 只是官方策略的教学例。</p>
+        </div>
+        <div class="num-card num-card--140">
+          <span>README 推荐保留</span><strong>140</strong>
+          <p>默认 V4.1 的 <b>consumer Prefill 推荐保留长度</b>（compact 模式）。</p>
+          <p>它不是 134 的别名，也不是“复制长度通用常数”；保留长度需满足窗口 + 回退约束。</p>
+        </div>
+      </div>
+
+      <figure class="lab rp-lab" data-rp aria-labelledby="rp-title">
+        <div class="lab-head">
+          <div>
+            <span class="lab-kicker">交互教学算例 · 同一 token 轴叠加“Block KV 复用”与“SWA 重建子区” / 不是通用缓存查询实现</span>
+            <h3 id="rp-title">Block KV 命中 L1 之后：复用、重放、后缀各多少？</h3>
+          </div>
+          <span class="lab-count" data-rp-label>当前 L=2,048 · L1=1,792</span>
+        </div>
+        <div class="lab-canvas">
+          <div class="rp-controls js-only">
+            <div class="rp-control">
+              <span>输入 L</span>
+              <div class="seg" role="group" aria-label="选择输入长度">
+                <button type="button" data-rp-l="128" aria-pressed="false">128</button>
+                <button type="button" data-rp-l="512" aria-pressed="false">512</button>
+                <button type="button" data-rp-l="2048" class="is-active" aria-pressed="true">2048</button>
+                <button type="button" data-rp-l="4096" aria-pressed="false">4096</button>
+              </div>
+            </div>
+            <label class="rp-control rp-range" for="rp-hit">
+              <span>Block KV 命中 L1</span>
+              <input class="rp-slider" id="rp-hit" type="range" min="0" max="1792" step="128" value="1792" data-rp-hit>
+              <output for="rp-hit" data-rp-hit-out>1792</output>
+            </label>
+            <button type="button" class="rp-empty" data-rp-empty>切到空命中</button>
+            <button type="button" class="rp-empty" data-rp-reset>恢复默认</button>
+          </div>
+          <div class="rp-readout">
+            <div><span>按 128 对齐上限</span><strong data-rp-max>1,792</strong><small data-rp-max-note>L − 134 = 1,914；向下对齐 → 1,792</small></div>
+            <div><span>当前命中 L1</span><strong data-rp-current>1,792</strong><small data-rp-current-note>0 = 空命中；滑块只到对齐上限</small></div>
+            <div><span>对象关系</span><strong>SWA 重建区 ⊆ Block KV 命中区</strong><small>0 个重建位置也在此关系内；不另加 Block KV token</small></div>
+          </div>
+          <div class="rp-grid">
+            <div class="rp-state rp-state--available" data-rp-state="available">
+              <div class="rp-state__head"><strong>① 匹配范围内有可用 SWA</strong><span class="badge badge--ok" data-rp-badge>L1 1,792 · 无需重建</span></div>
+              <p class="rp-state__sub" data-rp-summary>Block KV 复用 [0, 1,792)；匹配到可用 stored SWA，因此第二轨的重建位置为 0；新 suffix 从 1,792 到 2,048。</p>
+              <div class="rp-plot" data-rp-plot role="img" aria-label="L=2,048，L1=1,792。第一轨 Block KV 整段复用 0 到 1,792，新 suffix 1,792 到 2,048；第二轨只画需重建的 SWA 位置，SWA 可用时为 0，不表示整段 SWA 已保存。">
+                <div class="rp-lane">
+                  <div class="rp-lane__key"><strong>Block KV</strong><small>整段缓存复用</small></div>
+                  <div class="rp-bar rp-bar--kv" aria-hidden="true">
+                    <span class="rp-seg rp-seg--reuse" data-rp-seg="reuse" style="left:0;width:87.5%"></span>
+                    <span class="rp-seg rp-seg--suffix" data-rp-seg="suffix" style="left:87.5%;width:12.5%"></span>
+                  </div>
+                </div>
+                <div class="rp-lane">
+                  <div class="rp-lane__key"><strong>SWA 重建位置</strong><small data-rp-swa-key>0（SWA 可用）</small></div>
+                  <div class="rp-bar rp-bar--swa is-available" data-rp-swa-bar aria-hidden="true">
+                    <span class="rp-swa-fill" data-rp-swa-fill hidden></span>
+                    <span class="rp-swa-zero" data-rp-swa-zero>0 个需重建位置（第二轨为空）</span>
+                  </div>
+                </div>
+                <p class="rp-ranges" data-rp-ranges>复用 [0, 1,792) · SWA 重建 0（第二轨为空） · 新算 [1,792, 2,048)</p>
+              </div>
+              <div class="rp-legend"><span><i class="rp-swatch rp-swatch--reuse"></i>Block KV 复用（第一轨）</span><span><i class="rp-swatch rp-swatch--replay"></i>SWA 重建区（第二轨，缺失时才出现）</span><span><i class="rp-swatch rp-swatch--suffix"></i>新 suffix</span><span class="rp-legend__note">第二轨只画需要重建的 SWA 位置；物理 SWA 窗口只在前缀末尾；空白 = 0，不是整段 SWA 已保存。</span></div>
+              <div class="rp-numbers">
+                <div><span>Block KV 复用</span><b data-rp-num="reuse">1,792</b></div>
+                <div><span>SWA 重建 <small>仅第二轨；含于命中区</small></span><b data-rp-num="replay">0</b></div>
+                <div><span>新 suffix</span><b data-rp-num="suffix">256</b></div>
+              </div>
+              <p class="rp-accounting" data-rp-accounting>块账：复用 1,792 + 新 suffix 256 = L 2,048；SWA 重建 0（第二轨为空），不另占 token。</p>
+            </div>
+            <div class="rp-state rp-state--missing" data-rp-state="missing">
+              <div class="rp-state__head"><strong>② 没有可用 SWA</strong><span class="badge badge--wait" data-rp-badge>L1 1,792 · 重建 128</span></div>
+              <p class="rp-state__sub" data-rp-summary>Block KV 仍复用整段 [0, 1,792)；第二轨只在命中区末尾 [1,664, 1,792) 标出 128 个 encoder SWA 重建位置；新 suffix 仍为 256。</p>
+              <div class="rp-plot" data-rp-plot role="img" aria-label="L=2,048，L1=1,792。第一轨 Block KV 整段复用 0 到 1,792，新 suffix 1,792 到 2,048；第二轨只在命中区末尾 1,664 到 1,792 标出 128 个 SWA 重建位置，物理 SWA 窗口仅在尾部，不是整段。">
+                <div class="rp-lane">
+                  <div class="rp-lane__key"><strong>Block KV</strong><small>整段缓存复用</small></div>
+                  <div class="rp-bar rp-bar--kv" aria-hidden="true">
+                    <span class="rp-seg rp-seg--reuse" data-rp-seg="reuse" style="left:0;width:87.5%"></span>
+                    <span class="rp-seg rp-seg--suffix" data-rp-seg="suffix" style="left:87.5%;width:12.5%"></span>
+                  </div>
+                </div>
+                <div class="rp-lane">
+                  <div class="rp-lane__key"><strong>SWA 重建位置</strong><small data-rp-swa-key>末尾 128（SWA 缺失）</small></div>
+                  <div class="rp-bar rp-bar--swa is-missing" data-rp-swa-bar aria-hidden="true">
+                    <span class="rp-swa-fill" data-rp-swa-fill style="left:81.25%;width:6.25%"></span>
+                    <span class="rp-swa-zero" data-rp-swa-zero hidden>空命中 · 0 个需重建位置</span>
+                  </div>
+                </div>
+                <p class="rp-ranges" data-rp-ranges>复用 [0, 1,792) · SWA 重建 [1,664, 1,792)（第二轨仅末尾） · 新算 [1,792, 2,048)</p>
+              </div>
+              <div class="rp-legend"><span><i class="rp-swatch rp-swatch--reuse"></i>Block KV 复用（第一轨）</span><span><i class="rp-swatch rp-swatch--replay"></i>SWA 重建区（第二轨，缺失时才出现）</span><span><i class="rp-swatch rp-swatch--suffix"></i>新 suffix</span><span class="rp-legend__note">第二轨只画需要重建的 SWA 位置；物理 SWA 窗口只在前缀末尾；空白 = 0，不是整段 SWA 已保存。</span></div>
+              <div class="rp-numbers">
+                <div><span>Block KV 复用</span><b data-rp-num="reuse">1,792</b></div>
+                <div><span>SWA 重建 <small>仅第二轨；含于命中区</small></span><b data-rp-num="replay">128</b></div>
+                <div><span>新 suffix</span><b data-rp-num="suffix">256</b></div>
+              </div>
+              <p class="rp-accounting" data-rp-accounting>块账：复用 1,792 + 新 suffix 256 = L 2,048；SWA 重建 128 只在第二轨末尾，且已含在 Block KV 命中区内，不另加。</p>
+            </div>
+          </div>
+          <p class="rp-note" data-rp-note>L − 134 = 1,914；向下对齐得 L1=1,792。Block KV 复用 [0, 1,792)，suffix 为 [1,792, 2,048)；第二轨只显示 SWA 重建位置，SWA 缺失时仅在命中区末尾 [1,664, 1,792) 标出 128。</p>
+          <p class="rp-live" data-rp-live aria-live="polite">默认：L=2,048，L1=1,792。Block KV 复用 1,792；SWA 可用时第二轨为 0，缺失时只在 [1,664, 1,792) 标 128（物理窗口只在尾部）；两种状态的新 suffix 都是 256。</p>
+          <noscript>
+            <div class="nojs-fallback">
+              <h4>无脚本默认读数</h4>
+              <p>L=2,048，Block KV 命中上限 1,914，按 128 对齐后 L1=1,792。SWA 可用：Block KV 复用 1,792，第二轨为 0（不铺满整段），suffix 256。SWA 缺失：Block KV 仍整段复用 1,792，第二轨只在末尾 <code>[1,664,1,792)</code> 标出 128 个重建位置，suffix 仍为 256。第二轨只表示需要重建的 SWA 位置，不表示整段 SWA 已保存；物理 SWA 窗口只在前缀末尾。若 Block KV 命中为 0，不执行 SWA 子区重建，从 0 处理完整 prompt，不产生负位置。</p>
+            </div>
+          </noscript>
+        </div>
+        <div class="lab-state">
+          <span class="tag tag--sim">教学值</span>
+          <p><b>两条轨共用同一 token 轴。</b>第一轨始终是 Block KV 的整段复用范围；“L1=1,792”不会因为 SWA 缺失而缩成 1,664。第二轨只表示需要重建的 SWA 位置：可用时为 0，缺失时只标末尾 128，不是已保存 SWA 的全长。SWA 重建区始终含于 Block KV 命中区；真实恢复是近似的，不是与不截断推理逐位等价。</p>
+        </div>
+        <p class="lab-foot"><b>边界：</b>控件只演示官方命中策略的教学切片；空命中、短输入与不足一个 128 单位由控件显式处理，不套用“L−134”产生负位置。consumer/decoder 是否重放，不由本图的“SWA 可用”单独决定。</p>
+      </figure>
+
+      <details class="question">
+        <summary>展开推导：1914、1792、1664 与重放区间分别怎么来？</summary>
+        <div class="question__body">
+          <p><b>1.</b> 官方命中上限：<code>L − 134 = 2048 − 134 = 1914</code>。这里的 134 是默认 inference ring：<code>128</code> 窗口 + <code>6</code> max backtracking；不是“134 之外再加 backtracking”，kvstore ring 还可另加 extra-state。</p>
+          <p><b>2.</b> Block KV 命中必须按 128 对齐；在这个前提下取实际 <code>L1 = 1792</code>（不超过 1914 的 128 倍数）。</p>
+          <p><b>3.</b> SWA 可用：Block KV 复用 <code>[0,1792)</code>，SWA 重建 0，suffix 为 <code>[1792,2048)</code>，长度 <code>2048 − 1792 = 256</code>。</p>
+          <p><b>4.</b> SWA 缺失：Block KV 仍复用整段 <code>[0,1792)</code>，命中不缩短；只在其中取末尾窗口 <code>[1664,1792)</code> 的 128 token 重建 encoder SWA，suffix 仍是 256。</p>
+          <p><b>5.</b> 若 <code>L1=0</code>，没有命中窗口，也不会生成 SWA 重建子区；直接完整处理。短输入、未命中或不足一块都不套用上述减法，不产生负位置。</p>
+        </div>
+      </details>
+
+      <p class="perf-boundary">源码锚点：命中策略见 <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L179-L191" target="_blank" rel="noopener noreferrer">Q&amp;A:179–191</a>；可见域见 <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/input_metadata/prepare_tensor_input_v4.cpp#L149-L167" target="_blank" rel="noopener noreferrer">prepare_tensor_input_v4.cpp:149–167</a>；ring 与配置见 <a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/cache_engine.py#L88-L109" target="_blank" rel="noopener noreferrer">cache_engine.py:88–109</a>、<a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/environ.py#L135-L139" target="_blank" rel="noopener noreferrer">environ.py:135–139</a>、<a class="srcline" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/README.md#L25" target="_blank" rel="noopener noreferrer">README:25</a>。consumer 模式细节见 <a href="model.html#yoco-lab-title">模型页 YOCO 有界重放</a>。</p>
+    </div>
+  </section>
+
+  <section class="mech" id="roles" aria-labelledby="roles-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M16</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--infer">配置边界</span><span class="mech-time">约 6 分钟 · 角色 + flush</span></div>
+          <h2 id="roles-title">三种角色不是任意组合；没有待调度请求也不等于交付完毕</h2>
+          <p class="mech-thesis">NORMAL 处理 prompt 与 completion，PROMPT 只处理 prompt，COMPLETION 只处理 completion。COMPLETION 没有 Prefill 通道，所以构造 Scheduler 时拒绝 <code>stop_preempted_request=false</code>；它不是等显存不足后再偷偷切到 Prefill。ZOS 的最后一轮还可能留着上一轮 in-flight 状态，入口必须 <code>flush_inflight_reqs</code> 后才退出。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>默认 ZOS</dt><dd>NORMAL / COMPLETION 开；PROMPT 关</dd></div>
+          <div><dt>默认 ≠ 禁止</dt><dd>ZOS 仍可配置；不能把默认值写成硬约束</dd></div>
+          <div><dt>尾部风险</dt><dd>最后一个 token 在 prev_step_state 里</dd></div>
+        </dl>
+      </header>
+
+      <div class="table-scroll">
+        <table class="roles-table" aria-label="EngineType 职责与合法配置">
+          <thead><tr><th scope="col">角色</th><th scope="col">处理</th><th scope="col">Prefill 通道</th><th scope="col">默认 ZOS</th><th scope="col"><code>stop_preempted_request=false</code></th><th scope="col">结果</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>NORMAL</strong></td>
+              <td>prompt + completion</td>
+              <td>有；可做 Prefill，也可 Decode。</td>
+              <td>开</td>
+              <td>不触发 COMPLETION 的那条构造检查；抢占可按配置走重算。</td>
+              <td>通用角色；DP 组内还要统一本轮步型。</td>
+            </tr>
+            <tr>
+              <td><strong>PROMPT</strong></td>
+              <td>只处理 prompt</td>
+              <td>有；只跑 prefill 通道。</td>
+              <td>关</td>
+              <td>本条检查不适用（它针对 COMPLETION）；职责上不负责 completion。</td>
+              <td>给 Prefill 节点使用；不能把它当通用生成引擎。</td>
+            </tr>
+            <tr>
+              <td><strong>COMPLETION</strong></td>
+              <td>只处理 completion</td>
+              <td><strong>没有</strong>；不能重算被抢占请求。</td>
+              <td>开</td>
+              <td><strong>构造时拒绝</strong>；必须与 <code>true</code> 搭配。</td>
+              <td>只做 Decode；不会在显存不足后“悄悄切 Prefill”。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="prod-callout">
+        <b>为什么这算合法组合，而不是运行期偶发？</b>Scheduler 构造时就会检查 <code>engine_type == COMPLETION &amp;&amp; !stop_preempted_request</code>，失败直接拦截。把这个条件拖到运行中再解释，会误以为 COMPLETION 有一条隐藏的 Prefill 重算路径。
+      </div>
+
+      <div class="source-explain">
+        <div>
+          <article class="source-window" aria-label="engine_type.py 源码摘录">
+            <div class="source-window__bar"><div><span class="source-dot" aria-hidden="true"></span><span class="src-file">deepinfer/engine/engine_type.py</span></div><span class="src-function">EngineType</span></div>
+            <div class="source-window__meta"><span>职责与默认 ZOS</span><a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/engine_type.py" target="_blank" rel="noopener noreferrer">打开固定文件 ↗</a></div>
+            <pre><code>NORMAL = 0  # process prompts &amp; completions
+PROMPT = enum.auto()  # only process prompts
+COMPLETION = enum.auto()  # only process completions
+
+@property
+def default_zero_overhead_scheduling(self) -&gt; bool:
+    return self in (EngineType.NORMAL, EngineType.COMPLETION)</code></pre>
+            <div class="source-window__foot"><span>DeepSeek-AI / DeepInfer · <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></span><span>短段摘录，未改写</span></div>
+          </article>
+        </div>
+        <div class="source-read">
+          <p class="source-read__label">逐段读 / 角色</p>
+          <ol class="line-notes">
+            <li><b>enum</b><span>三个值对应三种职责；注释直接写出“prompts / completions”，不能把 PROMPT 当成“先跑 prompt 再自动切 D”。</span></li>
+            <li><b>ZOS</b><span>默认集合是 NORMAL 与 COMPLETION；PROMPT 默认关闭。默认值可配置，不等于“永远不能开”。</span></li>
+            <li><b>构造检查</b><span>COMPLETION 无 Prefill 通道，因此 <code>stop_preempted_request=false</code> 在 Scheduler 构造时被拒绝；见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L98-L104" target="_blank" rel="noopener noreferrer">scheduler.hpp:98–104</a>。</span></li>
+          </ol>
+          <p class="source-bridge"><b>不要把“角色”画成三个进程类。</b>NORMAL / PROMPT / COMPLETION 是引擎工作角色；VE / P / D 是生产部署阶段。两者相关，但不是同一层枚举。</p>
+        </div>
+      </div>
+
+      <div class="flush" aria-label="ZOS 最后 flush 时间线">
+        <div class="flush__head"><span><b>最后一轮收尾</b> · 同一个 token T 从 sample 到 RequestOutput</span><span>方法顺序，不是硬件 trace</span></div>
+        <div class="flush__track">
+          <div class="flush-step flush-step--sample">
+            <span>第 N 轮 · sample</span>
+            <strong>T 已采样，event 已记录</strong>
+            <p>普通 ZOS decode 步先下发 forward，再处理上一轮，随后修正长度并 sample 当前轮。<code>sample_end_evt.record()</code> 只是记录，不等于完成。</p>
+          </div>
+          <div class="flush-step flush-step--inflight">
+            <span>状态保存</span>
+            <strong>T 留在 prev_step_state</strong>
+            <p>当前轮 state 被保存给下一轮；CPU 侧可能还没拿到 T，RequestOutput 也还没产生。此时“没有新的可调度请求”与“结果已交付”不同。</p>
+          </div>
+          <div class="flush-step flush-step--flush">
+            <span>unfinished=false · 1</span>
+            <strong>先 flush 在途请求</strong>
+            <p><code>LLM._run_engine</code> 发现没有 unfinished 后，改走 <code>flush_inflight_reqs()</code>；它同步 sample event，并对 <code>prev_step_state</code> 做 post-process，返回最后一批 raw output。</p>
+          </div>
+          <div class="flush-step flush-step--clone">
+            <span>循环内 · 2</span>
+            <strong>clone / 收集，然后 break</strong>
+            <p>对 flush 返回的每个 raw output 执行 <code>RequestOutput.clone</code>，按 <code>request_id</code> 收集；随后才因 <code>not unfinished</code> 跳出循环。clone 在 break 之前。</p>
+          </div>
+          <div class="flush-step flush-step--out">
+            <span>循环外 · 3</span>
+            <strong>最终 decode → 交付</strong>
+            <p>循环退出后，才按 request_id 排序并做 tokenizer decode，返回最终结果。顺序是 flush → clone/收集 → break → decode，不是 flush 完就立即 decode。</p>
+          </div>
+        </div>
+        <p class="flush__foot"><b>可追踪对象：</b>T 依次经过 sample 完成、在途 state、flush 的 post-process、clone/收集、break 与最终 decode；不要只画“进度条到 100%”。也没有待调度请求时，仍可能有在途结果。</p>
+      </div>
+
+      <p class="source-attrib">入口循环见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/entrypoints/llm.py#L174-L186" target="_blank" rel="noopener noreferrer">llm.py:174–186</a>；flush 与 post-process 见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L274-L283" target="_blank" rel="noopener noreferrer">worker.py:274–283</a>；worker 步进顺序见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/worker/worker.py#L113-L189" target="_blank" rel="noopener noreferrer">worker.py:113–189</a>；ZOS 顺序细节见 <a href="runtime.html#zos">运行时页 ZOS</a>。</p>
+      <div class="prod-callout prod-callout--teal"><b>判断口诀：</b>角色决定“这个引擎做哪段工作”；ZOS 决定“上一轮后处理能否推迟”；flush 决定“最后还没交付的结果怎么收口”。三者不能用一个“结束”状态概括。</div>
+    </div>
+  </section>
+
+  <section class="mech" id="points" aria-labelledby="points-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M17</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--source">官方图表</span><span class="tag tag--infer">条件化读法</span><span class="mech-time">约 8 分钟 · 图 + 六个离散点</span></div>
+          <h2 id="points-title">同一张图回答不了两个问题；同一个机制也不是每个工作点都更快</h2>
+          <p class="mech-thesis">Prefill 原图的横轴是单次 prefill step 时延，不是 TTFT；Decode 原图的横轴是每用户 tokens/s，纵轴才是每 GPU tokens/s。DSpark 的六个官方点里，16 并发是负收益；32/48/72/60/96 并发均为正收益，约 +1.6%/+3.6%/+6.7%/+5.4%/+11.0%。少验证几个 token 不保证更高吞吐；Prefill、Decode 图是官方 benchmark 结果，DSpark 表是确定 EP64/DP64 配置下的官方推算，均非本站实测。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>Prefill 图</dt><dd>x=step 时延；y=非缓存输入 tok/s/GPU</dd></div>
+          <div><dt>Wide-EP 图</dt><dd>两套配置同时变；不能单因子归因</dd></div>
+          <div><dt>DSpark 表</dt><dd>fixed-5 vs 动态验证；6 个离散并发点</dd></div>
+        </dl>
+      </header>
+
+      <div class="graph-read">
+        <article class="graph-card">
+          <div class="graph-card__head"><div><strong>Prefill Pareto：点标签是每 rank 的 batch tokens</strong><span>官方原图固定到 commit</span></div><span class="tag tag--source">官方 benchmark</span></div>
+          <div class="axis" aria-label="Prefill 图坐标轴示意">
+            <span class="axis__y">非缓存输入 tok/s/GPU ↑</span>
+            <span class="axis__x">ms / prefill step →</span>
+            <span class="axis__q">越靠上：单位时间喂入更多非缓存输入；越靠右：一步更慢。两点不能只看哪个“更高”。</span>
+            <span class="axis__note">点标签 ≠ 并发请求数</span>
+          </div>
+          <p class="graph-card__conditions"><b>条件：</b>EP4DP4；384 + 32 experts；context=131072；decoder replay keep=140。横轴不是 TTFT，也不包含排队与网络。</p>
+          <div class="graph-card__body">
+            <p><b>能回答：</b>在固定配置下，不同 batch 工作点的“步时延 / 每卡输入吞吐”取舍。</p>
+            <p><b>不能回答：</b>端到端 TTFT、用户侧延迟、其他 EP/DP 配置，或某个点必然更优。</p>
+            <a class="graph-card__link" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/images/prefill_pareto.png" target="_blank" rel="noopener noreferrer">打开官方固定原图 ↗</a>
+          </div>
+        </article>
+        <article class="graph-card">
+          <div class="graph-card__head"><div><strong>Wide-EP Decode：两套配置同时变化</strong><span>点标签是每 rank 并发请求数</span></div><span class="tag tag--deploy">官方 benchmark</span></div>
+          <div class="axis" aria-label="Wide-EP Decode 图坐标轴示意">
+            <span class="axis__y">每 GPU tokens/s ↑</span>
+            <span class="axis__x">每用户 tokens/s →</span>
+            <span class="axis__q">每个点同时代表并发与两维吞吐；不是一条“用户吞吐换卡吞吐”的普遍曲线。</span>
+            <span class="axis__note">EP64/DP64 与 EP8/DP8 两因素同时变</span>
+          </div>
+          <p class="graph-card__conditions"><b>共同条件：</b>context=131072；fixed nextn=3；a=75%；τ=3.25。对照：EP64DP64 / 384+64 experts 与 EP8DP8 / 384+32 experts。</p>
+          <div class="graph-card__body">
+            <p><b>能回答：</b>这两套具体配置在给定并发下的每用户 / 每卡吞吐位置。</p>
+            <p><b>不能回答：</b>“EP 单独贡献了多少”。并行规模与冗余专家数量同时改变，多变量对照不能单因子归因。</p>
+            <a class="graph-card__link" href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/images/wide_ep_decode_pareto.png" target="_blank" rel="noopener noreferrer">打开官方固定原图 ↗</a>
+          </div>
+        </article>
+      </div>
+
+      <div class="formula-band">
+        <div class="formula">
+          <span>满接受 benchmark 记账</span>
+          <strong>SPS × requests × (1 + nextn) / CP</strong>
+          <p>教学：SPS=100，requests=60，nextn=3，CP=1 → <b>24,000</b>。这是记账换算，不是本站吞吐。</p>
+        </div>
+        <div class="formula">
+          <span>固定长度作图的接受率折算</span>
+          <strong>SPS × requests × τ / CP</strong>
+          <p>τ = 1 + nextn × a；教学 a=.75 → τ=3.25，结果 <b>19,500</b>。固定图明确拒绝 VARLEN=1，不能二次折算。</p>
+        </div>
+      </div>
+      <p class="source-attrib" style="margin-top:-2px">公式与官方图条件见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/examples/benchmark.py#L397-L408" target="_blank" rel="noopener noreferrer">benchmark.py:397–408</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/examples/sweep/plot_pareto.py#L58-L75" target="_blank" rel="noopener noreferrer">plot_pareto.py:58–75</a>、<a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L245-L264" target="_blank" rel="noopener noreferrer">Q&amp;A:245–264</a>。</p>
+
+      <div class="dspark" aria-label="DSpark 六个官方离散工作点">
+        <div class="dspark__head">
+          <div><strong>DSpark：六个真实离散工作点，不是一条可插值的收益曲线</strong><span>官方 EP64/DP64 benchmark 推算；fixed-5 vs 动态验证长度</span></div>
+          <span class="tag tag--infer">非本站实测</span>
+        </div>
+        <div class="dspark__legend">
+          <span><i class="ds-swatch ds-swatch--fixed"></i>fixed-5 tok/s/rank</span>
+          <span><i class="ds-swatch ds-swatch--dynamic"></i>动态验证 tok/s/rank</span>
+          <span>条长按同一 20,000 标尺；只连接阅读行，不绘制预测线</span>
+        </div>
+        <div class="ds-rows">
+          <div class="ds-row is-regress">
+            <div class="ds-point">16<small>seqs/rank</small></div>
+            <div class="ds-bars">
+              <div class="ds-bar-row"><span>fixed-5</span><i style="--w:24.5%"></i><b>4,891</b></div>
+              <div class="ds-bar-row is-dynamic"><span>动态</span><i style="--w:24.1%"></i><b>4,816</b></div>
+            </div>
+            <div class="ds-delta is-down">−1.5%</div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-point">32<small>seqs/rank</small></div>
+            <div class="ds-bars">
+              <div class="ds-bar-row"><span>fixed-5</span><i style="--w:44.8%"></i><b>8,964</b></div>
+              <div class="ds-bar-row is-dynamic"><span>动态</span><i style="--w:45.6%"></i><b>9,111</b></div>
+            </div>
+            <div class="ds-delta is-up">+1.6%</div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-point">48<small>seqs/rank</small></div>
+            <div class="ds-bars">
+              <div class="ds-bar-row"><span>fixed-5</span><i style="--w:60.2%"></i><b>12,032</b></div>
+              <div class="ds-bar-row is-dynamic"><span>动态</span><i style="--w:62.3%"></i><b>12,467</b></div>
+            </div>
+            <div class="ds-delta is-up">+3.6%</div>
+          </div>
+          <div class="ds-row is-highlight">
+            <div class="ds-point">60<small>seqs/rank</small></div>
+            <div class="ds-bars">
+              <div class="ds-bar-row"><span>fixed-5</span><i style="--w:68.7%"></i><b>13,730</b></div>
+              <div class="ds-bar-row is-dynamic"><span>动态</span><i style="--w:72.3%"></i><b>14,466</b></div>
+            </div>
+            <div class="ds-delta is-up">+5.4%</div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-point">72<small>seqs/rank</small></div>
+            <div class="ds-bars">
+              <div class="ds-bar-row"><span>fixed-5</span><i style="--w:74.8%"></i><b>14,962</b></div>
+              <div class="ds-bar-row is-dynamic"><span>动态</span><i style="--w:79.8%"></i><b>15,961</b></div>
+            </div>
+            <div class="ds-delta is-up">+6.7%</div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-point">96<small>seqs/rank</small></div>
+            <div class="ds-bars">
+              <div class="ds-bar-row"><span>fixed-5</span><i style="--w:84.1%"></i><b>16,817</b></div>
+              <div class="ds-bar-row is-dynamic"><span>动态</span><i style="--w:93.3%"></i><b>18,660</b></div>
+            </div>
+            <div class="ds-delta is-up">+11.0%</div>
+          </div>
+        </div>
+        <p class="dspark__foot"><b>读法：</b>16 并发动态验证更短（4.44 vs 5.00），吞吐却低 1.5%；32/48/72/60/96 并发均为正收益，不是“只有 60 与 96”。动态接受长度也略变（3.24 / 3.21 / 3.15 等），不能用“验证 token 少”单独解释吞吐。官方表也没有证明 16 并发退化的唯一根因；没有提供的并发不做插值，不把 nextn=3 的固定长度图与 fixed-5 的 DSpark 表混成同一实验。</p>
+        <details class="question" style="margin:0 12px 12px">
+          <summary>展开官方六工作点完整数值表</summary>
+          <div class="question__body">
+            <div class="table-scroll">
+              <table aria-label="DSpark 六个官方工作点完整表">
+                <thead><tr><th>并发 seqs/rank</th><th>fixed 验证长度</th><th>动态验证长度</th><th>fixed 接受长度</th><th>动态接受长度</th><th>fixed tok/s/rank</th><th>动态 tok/s/rank</th><th>官方收益</th></tr></thead>
+                <tbody>
+                  <tr><td>16</td><td>5</td><td>4.44</td><td>3.32</td><td>3.24</td><td>4,891</td><td>4,816</td><td>−1.5%</td></tr>
+                  <tr><td>32</td><td>5</td><td>3.65</td><td>3.25</td><td>3.17</td><td>8,964</td><td>9,111</td><td>+1.6%</td></tr>
+                  <tr><td>48</td><td>5</td><td>3.94</td><td>3.30</td><td>3.26</td><td>12,032</td><td>12,467</td><td>+3.6%</td></tr>
+                  <tr><td>60</td><td>5</td><td>3.58</td><td>3.30</td><td>3.21</td><td>13,730</td><td>14,466</td><td>+5.4%</td></tr>
+                  <tr><td>72</td><td>5</td><td>3.24</td><td>3.29</td><td>3.12</td><td>14,962</td><td>15,961</td><td>+6.7%</td></tr>
+                  <tr><td>96</td><td>5</td><td>3.24</td><td>3.30</td><td>3.15</td><td>16,817</td><td>18,660</td><td>+11.0%</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p style="margin:8px 0 0">表按官方 Q&amp;A 的离散行重绘；是 EP64/DP64 benchmark 推算，不是本站运行。官方称生产工作点约 60 并发；这不等于所有部署的最优点。</p>
+          </div>
+        </details>
+      </div>
+
+      <div class="prod-callout prod-callout--violet">
+        <b>工作点不能泛化的四个原因：</b>① 配置不同（EP/DP、专家数、context、nextn、a）；② 坐标不同（step 时延、每用户吞吐、每卡吞吐、端到端 TTFT）；③ 并发与 batch 改变每步工作量；④ 计数口径不同（benchmark 满接受、τ 折算、DSpark 固定/动态验证）。任意一项换了，就不能把旧点的收益直接搬过去。
+      </div>
+
+      <div class="mech-tail">
+        <div class="perf-ledger">
+          <span class="ledger-label">性能作用与代价</span>
+          <p>有界重放减少的是可重算范围，不是把所有前缀工作删掉：Block KV 仍要读，consumer 的 full KV 支路与边界转换仍有成本。动态验证减少低收益的验证 token，但引入置信度调度、GPU 侧重算与元数据校正；收益取决于并发与接受率分布，16 并发的官方退化就是边界。</p>
+          <p class="perf-boundary">本页无 GPU 实测；官方图表与 DSpark 表是特定快照的官方描述/估算。MFU、GPU busy 与用户吞吐仍是不同仪表，不能互相替代。</p>
+        </div>
+        <details class="question">
+          <summary>想一想：如果读者只记住“缓存命中就省 prefill”，会漏掉什么？</summary>
+          <div class="question__body"><p>会漏掉命中长度检查、SWA/consumer state 的可用性、fetch/swap-in 成本、P→D 交接与最后一轮 flush。更稳的说法是：<b>Block KV 命中减少了可复用的前缀块工作，但继续计算所需状态和异步尾部仍需单独满足。</b></p></div>
+        </details>
+      </div>
+
+      <p class="source-attrib">官方 DSpark 表与收益见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L245-L264" target="_blank" rel="noopener noreferrer">Q&amp;A:245–264</a>；可变长度预算见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/layers/tilelang_ops/schedule_mtp_varlen.py#L20-L97" target="_blank" rel="noopener noreferrer">schedule_mtp_varlen.py:20–97</a>；采样页的 DSpark 机制见 <a href="sampling.html#dspark">采样与结构</a>。</p>
+    </div>
+  </section>
+
+  <nav class="unit-turn" aria-label="单元导航">
+    <div class="wrap unit-turn__in">
+      <a href="performance.html">
+        <small>PREV / 05</small>
+        <span><strong>测量与效率</strong><span class="micro-note" style="display:block">MFU 口径、τ 与验证边界</span></span>
+      </a>
+      <div class="unit-turn__mid"><span>06 / 06</span><i aria-hidden="true"></i><span>生产剖面</span></div>
+      <a class="unit-turn__next" href="atlas.html">
+        <small>NEXT / ATLAS</small>
+        <span><strong>整机图谱</strong><span class="micro-note" style="display:block">KV 落点、来源与 YOCO 可见域</span></span>
+      </a>
+    </div>
+  </nav>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap site-footer__in">
+    <div>
+      <a class="brand brand--footer" href="index.html">
+        <svg class="brand__mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M5 8h13v11H5zM22 8h13v24H22zM5 23h13v9H5z"/><path class="brand__cut" d="M5 19h30M18 8v24"/></svg>
+        <span class="brand__text"><strong>DeepInfer</strong><span>源码剖面</span></span>
+      </a>
+      <p>中文、面向初学者、可回到固定源码行号的 DeepInfer 教学站。</p>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">总览</a>
+      <a href="scheduling.html">请求与调度</a>
+      <a href="runtime.html">运行时与异步</a>
+      <a href="model.html">模型与注意力</a>
+      <a href="sampling.html">采样与结构</a>
+      <a href="performance.html">测量与效率</a>
+      <a href="production.html">生产恢复</a>
+      <a href="atlas.html">整机图谱</a>
+      <a href="index.html#glossary">术语</a>
+      <a href="index.html#resources">资料下载</a>
+      <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 ↗</a>
+    </div>
+    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-27 · 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
+  </div>
+</footer>
+</body>
+</html>
