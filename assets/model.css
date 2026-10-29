@@ -550,3 +550,88 @@
   .mdl-node strong { font-size: 12px; }
   .mdl-node small { font-size: 10px; }
 }
+
+/* 2026-10-29 supplement: EPLB statistics window vs action period */
+.eplb-cycle { border: 1px solid var(--ink); background: var(--surface); margin: 0 0 18px; }
+.eplb-cycle__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 11px 13px; border-bottom: 1px solid var(--line-dark); background: var(--paper-deep); }
+.eplb-cycle__head h3 { margin: 0; font-size: 24px; line-height: 1.25; }
+.eplb-cycle__head .micro-label { margin-bottom: 3px; }
+.cycle-rules { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.cycle-rules > div { padding: 10px 12px; border-right: 1px solid var(--line); min-width: 0; }
+.cycle-rules > div:last-child { border-right: 0; }
+.cycle-rules span { display: block; font-family: var(--font-mono); font-size: 8.5px; color: var(--muted); letter-spacing: .03em; }
+.cycle-rules strong { display: block; margin: 3px 0 4px; font-size: 12px; line-height: 1.4; }
+.cycle-rules p { margin: 0; font-size: 10px; line-height: 1.65; color: var(--ink-soft); }
+.cycle-coldstart { margin: 0; padding: 9px 12px; border-bottom: 1px solid var(--line); background: #fff8e8; font-size: 10.5px; line-height: 1.7; color: var(--ink-soft); }
+.cycle-coldstart b { color: var(--ink); }
+.cycle-case { display: grid; grid-template-columns: 180px minmax(0, 1fr); border-bottom: 1px solid var(--line); }
+.cycle-case__label { padding: 11px 12px; border-right: 1px solid var(--line); background: rgb(20 44 43 / 3%); }
+.cycle-case__label span { display: block; font-family: var(--font-mono); font-size: 8.5px; color: var(--teal); }
+.cycle-case__label strong { display: block; margin: 4px 0 3px; font-family: var(--font-mono); font-size: 15px; line-height: 1.5; color: var(--ink); }
+.cycle-case__label small { display: block; font-size: 9.5px; line-height: 1.55; color: var(--muted); }
+.cycle-case__body { padding: 11px 13px 10px; min-width: 0; }
+.cycle-axis { position: relative; height: 74px; margin: 0 8px 2px; border-bottom: 1px solid var(--line-dark); }
+.cycle-line { position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--line-dark); }
+.cycle-mark { position: absolute; bottom: 0; left: var(--at); transform: translateX(-50%); width: 94px; padding-bottom: 5px; border-left: 1px dashed var(--signal); text-align: left; }
+.cycle-mark::after { content: ""; position: absolute; left: -4px; bottom: -4px; width: 7px; height: 7px; background: var(--signal); transform: rotate(45deg); }
+.cycle-mark b { display: block; margin-left: 5px; font-family: var(--font-mono); font-size: 12px; line-height: 1.2; color: var(--ink); }
+.cycle-mark span { display: block; margin-left: 5px; font-family: var(--font-mono); font-size: 8.5px; line-height: 1.3; color: var(--muted); }
+.cycle-mark--first { transform: none; }
+.cycle-mark--last { transform: translateX(-100%); border-left: 0; border-right: 1px dashed var(--signal); text-align: right; }
+.cycle-mark--last::after { left: auto; right: -4px; }
+.cycle-mark--last b, .cycle-mark--last span { margin-left: 0; margin-right: 5px; }
+.cycle-windows { margin: 7px 0 0; font-size: 9.5px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
+.cycle-windows b { color: var(--ink-soft); }
+.cycle-zoom { margin: 12px 12px 10px; border: 1px solid var(--line-dark); background: #fffdf6; }
+.cycle-zoom__head { display: flex; justify-content: space-between; gap: 10px; padding: 7px 9px; border-bottom: 1px solid var(--line); font-size: 9px; line-height: 1.5; color: var(--muted); }
+.cycle-zoom__head span { font-family: var(--font-mono); color: var(--signal); }
+.cycle-zoom__head strong { color: var(--ink-soft); font-weight: 500; }
+.cycle-zoom__bar { display: grid; grid-template-columns: 1fr 10%; margin: 9px; border: 1px solid var(--line-dark); font-family: var(--font-mono); font-size: 8.5px; line-height: 1.4; }
+.cycle-zoom__old { padding: 7px; background: var(--paper); color: var(--muted); }
+.cycle-zoom__recent { padding: 7px 4px; background: var(--sulphur); color: var(--ink); text-align: center; overflow-wrap: anywhere; }
+.cycle-zoom p { margin: 0; padding: 0 9px 9px; font-size: 10px; line-height: 1.65; color: var(--ink-soft); }
+.cycle-details { margin: 0 12px 10px; border: 1px solid var(--line-dark); background: var(--surface); }
+.cycle-details summary { cursor: pointer; padding: 8px 10px; font-size: 10.5px; line-height: 1.6; color: var(--ink); }
+.cycle-details summary:hover { background: #fff8ed; }
+.cycle-details[open] summary { border-bottom: 1px solid var(--line); }
+.cycle-details > div { padding: 9px 10px 10px; }
+.cycle-details p { margin: 0 0 6px; font-size: 10px; line-height: 1.7; color: var(--ink-soft); }
+.cycle-details p:last-child { margin-bottom: 0; }
+.cycle-details b { color: var(--ink); }
+.eplb-cycle__foot { margin: 0; padding: 8px 12px 10px; border-top: 1px solid var(--line); font-size: 9px; line-height: 1.6; color: var(--muted); }
+@media (max-width: 860px) {
+  .cycle-rules { grid-template-columns: 1fr; }
+  .cycle-rules > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .cycle-rules > div:last-child { border-bottom: 0; }
+  .cycle-case { grid-template-columns: 1fr; }
+  .cycle-case__label { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+@media (max-width: 640px) {
+  .eplb-cycle__head { display: block; }
+  .eplb-cycle__head .eplb-badge { display: inline-block; margin-top: 6px; }
+  .cycle-zoom__head { display: block; }
+  .cycle-zoom__head strong { display: block; margin-top: 2px; }
+  .cycle-case__body { padding: 10px 9px 9px; }
+  .cycle-axis {
+    display: grid; height: auto; margin: 0;
+    border-bottom: 0;
+  }
+  .cycle-line { display: none; }
+  .cycle-mark,
+  .cycle-mark--first,
+  .cycle-mark--last {
+    position: relative; left: auto; bottom: auto;
+    transform: none; width: auto;
+    padding: 7px 8px 7px 13px;
+    border-left: 2px solid var(--signal);
+    border-right: 0; text-align: left;
+  }
+  .cycle-mark::after {
+    left: -5px; right: auto; bottom: auto; top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+  }
+  .cycle-mark b { display: inline; margin: 0; font-size: 11px; }
+  .cycle-mark span { display: inline; margin: 0 0 0 8px; padding-left: 8px; border-left: 1px solid var(--line-dark); font-size: 9px; }
+  .cycle-mark--last b { margin-right: 0; }
+  .cycle-mark--last span { margin: 0 0 0 8px; padding-left: 8px; border-left: 1px solid var(--line-dark); }
+}

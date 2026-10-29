@@ -84,7 +84,7 @@
           <ol>
             <li><a href="#structure"><span class="num">01</span><span><strong>骨架、插入点与三条旁路</strong><small>40 层地图、mHC/Engram、视觉与预测</small></span><span class="unit-map__state">点选层</span></a></li>
             <li><a href="#attention"><span class="num">02</span><span><strong>先选位置，再读 KV</strong><small>SWA / 主 KV / index-K / Top-k / YOCO</small></span><span class="unit-map__state">3 组连续</span></a></li>
-            <li><a href="#parallel"><span class="num">03</span><span><strong>同一批卡的多张视图</strong><small>DP/CP/EP、完整 MoE 返回、EPLB</small></span><span class="unit-map__state">条件对照</span></a></li>
+            <li><a href="#parallel"><span class="num">03</span><span><strong>同一批卡的多张视图</strong><small>DP/CP/EP、完整 MoE 返回、EPLB 周期</small></span><span class="unit-map__state">条件对照</span></a></li>
           </ol>
           <p class="unit-map__foot">实心对象是张量或请求，索引列表是位置编号，虚线是地址/控制。图里的 12 个位置、4 个专家是教学缩小例，不是运行 trace。</p>
         </aside>
@@ -96,6 +96,7 @@
           <li>ratio=1 为什么仍是稀疏路径，而不是改回 dense</li>
           <li>YOCO compact 裁掉哪些行、哪些 KV 仍然保存</li>
           <li>MoE 的结果怎样回到原 token，EPLB 为什么没有新增专家</li>
+          <li>EPLB 的 N 与 M 各回答什么，为什么首次不是等满 M</li>
         </ul>
       </div>
     </div>
@@ -696,6 +697,65 @@ for layer_id in range(args.n_mtp_layers):
           </div>
         </div>
         <p class="eplb-foot"><b>教学估算：</b>E0 的 12 个历史 token 在 2 个副本上理想均分为 6/6；E1 的 4 个、E2 的 4 个各 1 份。副本预算固定为 1。真实算法看多步向量，实际下一批路由可能偏离；moe_load_balance_ratio 是 token 计数代理，不是 rank 运行时间或 MFU。</p>
+      </div>
+
+
+      <div class="eplb-cycle" aria-labelledby="eplb-cycle-title">
+        <div class="eplb-cycle__head">
+          <div><span class="micro-label">STATISTICS WINDOW N / ACTION PERIOD M · STEP COUNT</span><h3 id="eplb-cycle-title">N 看多长历史，M 隔多久动一次；第一次还会提前</h3></div>
+          <span class="eplb-badge">N、M 都是 step 数</span>
+        </div>
+        <div class="cycle-rules">
+          <div><span>每个符合条件的 step</span><strong>收集</strong><p>把本层、本 rank 的专家 token 计数写入环形统计窗；token 计数是负载代理，不是毫秒或 MFU。</p></div>
+          <div><span>窗口 N</span><strong>看多长历史</strong><p>只保留最近 N 个 step 的统计。动作发生时既不累计从第 1 次起的全部历史，也不只看当前一次。</p></div>
+          <div><span>周期 M</span><strong>隔多久搬一次</strong><p>到达周期才重排副本并搬权重、切 map。先写统计窗，再判断是否达到周期；不是每步都搬。</p></div>
+        </div>
+        <p class="cycle-coldstart"><b>冷启动：</b>构造时 <code>initial_delay = max(1, M // 4)</code>。首次重排在第 250 / 2,500 次，不是等满 M；之后每 M 个符合条件的 step 再重排。本图不省略冷启动；以下动作次序都从 1 开始计数。</p>
+
+        <div class="cycle-case">
+          <div class="cycle-case__label"><span>专用 P · 官方部署例子</span><strong>N = 100<br>M = 1,000</strong><small>首次 1,000 // 4 = 250<br>之后 +1,000</small></div>
+          <div class="cycle-case__body">
+            <div class="cycle-axis" role="img" aria-label="专用 P：第 250 次首次重排，之后第 1,250、2,250、3,250 次重排；每次动作使用截至当前的最近 100 次统计，第 250 次首次重排包含第 151–250 次。">
+              <div class="cycle-line" aria-hidden="true"></div>
+              <div class="cycle-mark cycle-mark--first" style="--at:8%"><b>第 250 次</b><span>首次 · M/4</span></div>
+              <div class="cycle-mark" style="--at:38%"><b>第 1,250 次</b><span>+M</span></div>
+              <div class="cycle-mark" style="--at:69%"><b>第 2,250 次</b><span>+M</span></div>
+              <div class="cycle-mark cycle-mark--last" style="--at:96%"><b>第 3,250 次</b><span>+M</span></div>
+            </div>
+            <p class="cycle-windows"><b>动作时窗口：</b>P：第 250 次用第 151–250 次（含当前）；第 1,250 次用第 1,151–1,250 次；第 2,250 次用第 2,151–2,250 次。其余动作同理，不是从第 1 次累计。</p>
+          </div>
+        </div>
+
+        <div class="cycle-case">
+          <div class="cycle-case__label"><span>专用 D · 官方部署例子</span><strong>N = 1,000<br>M = 10,000</strong><small>首次 10,000 // 4 = 2,500<br>之后 +10,000</small></div>
+          <div class="cycle-case__body">
+            <div class="cycle-axis" role="img" aria-label="专用 D：第 2,500 次首次重排，之后第 12,500、22,500、32,500 次重排；每次动作使用截至当前的最近 1,000 次统计，第 2,500 次首次重排包含第 1,501–2,500 次。">
+              <div class="cycle-line" aria-hidden="true"></div>
+              <div class="cycle-mark cycle-mark--first" style="--at:8%"><b>第 2,500 次</b><span>首次 · M/4</span></div>
+              <div class="cycle-mark" style="--at:38%"><b>第 12,500 次</b><span>+M</span></div>
+              <div class="cycle-mark" style="--at:69%"><b>第 22,500 次</b><span>+M</span></div>
+              <div class="cycle-mark cycle-mark--last" style="--at:96%"><b>第 32,500 次</b><span>+M</span></div>
+            </div>
+            <p class="cycle-windows"><b>动作时窗口：</b>D：第 2,500 次用第 1,501–2,500 次（含当前）；第 12,500 次用第 11,501–12,500 次。其余动作同理；窗口更长，但仍然只是最近 1,000 次，不是从第 1 次累计。</p>
+          </div>
+        </div>
+
+        <div class="cycle-zoom">
+          <div class="cycle-zoom__head"><span>动作发生的那一刻</span><strong>最近 N 次进入统计，更早的 step 不进入本次计算</strong></div>
+          <div class="cycle-zoom__bar" aria-hidden="true"><span class="cycle-zoom__old">更早的 step · 不参与本次统计</span><span class="cycle-zoom__recent">最近 N 次</span></div>
+          <p>P：N/M = 100/1,000；D：1,000/10,000。两者窗口都占周期的 10%，但绝对长度不同。相同的最新统计下，M 只决定何时采用新的专家放置。</p>
+        </div>
+
+        <details class="cycle-details">
+          <summary>分层看边界：NORMAL Prefill、EP≤1、关闭重排</summary>
+          <div>
+            <p><b>前提：</b>本图把官方 P 的 100/1,000 与 D 的 1,000/10,000 代入公开源码，并简化为“专用引擎、每步都参与、EP&gt;1”。这是条件化推导，不是生产 trace；图中的“第 N 次”按符合条件并更新统计的 step 次数计，不是任意运行模式的全局 step 编号。重排只发生在其中的第 250、1,250…次（专用 D 为第 2,500、12,500…次）；其余符合条件的 step 只更新统计。</p>
+            <p><b>模式分支：</b><code>NORMAL</code> 还有 Prefill 分支，可能跳过 Prefill 的重排统计，或把重排安排到后续非 Prefill step；因此本图不能直接套到所有 NORMAL 运行。</p>
+            <p><b>关闭与范围：</b>重排开启时要求 <code>1 ≤ N ≤ M</code>；<code>M=0</code> 关闭重排，但不等于关闭所有负载统计，统计另有调用。EP≤1 会提前返回。窗口默认 100 见 <code>environ.py:122</code>；官方 P/D 参数不是源码按角色自动设置的统一默认值。</p>
+            <p><b>取舍：</b>更短 M 更快响应热点，也增加权重搬运和同步成本；更长 N 保留更长历史，也可能保留已经过时的热点。这里不声称某组参数普遍最优。</p>
+          </div>
+        </details>
+        <p class="eplb-cycle__foot">源码条件见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/eplb/__init__.py#L102-L165" target="_blank" rel="noopener noreferrer">eplb/__init__.py:102–165</a>；官方 P/D 参数见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L95-L103" target="_blank" rel="noopener noreferrer">Q&amp;A:95–103</a>；窗口默认见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/environ.py#L122" target="_blank" rel="noopener noreferrer">environ.py:122</a>。</p>
       </div>
 
       <table class="kernel-table">

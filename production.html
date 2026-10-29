@@ -22,7 +22,7 @@
   <div class="wrap version-bar__in">
     <span>固定源码 <code>5537415</code></span>
     <span class="version-bar__sep" aria-hidden="true"></span>
-    <span>分析日期 2026-10-27</span>
+    <span>分析日期 2026-10-27 · 补充 2026-10-29</span>
     <span class="version-bar__sep" aria-hidden="true"></span>
     <span>静态源码阅读，无 GPU 实测</span>
     <a href="index.html#boundary">证据边界</a>
@@ -57,6 +57,8 @@
     <span class="unit-ribbon__label">PRODUCTION / 06</span>
     <nav aria-label="本页内容">
       <a href="#path">生产路径</a>
+      <a href="#route">分桶与路由</a>
+      <a href="#pools">P/D 资源</a>
       <a href="#state">状态生命周期</a>
       <a href="#replay">两类重放</a>
       <a href="#roles">角色与收尾</a>
@@ -72,22 +74,24 @@
       <p class="eyebrow"><span class="eyebrow__rule"></span>生产边界 · 请求 / 缓存 / 恢复 / PRODUCTION PATH</p>
       <div class="unit-hero__grid">
         <div>
-          <h1 id="unit-title">命中之后，<br><span>还要回答四个问题。</span></h1>
-          <p class="unit-hero__lede">一条生产请求先经过 Recipe 编码、Entrypoint 的缓存匹配与路由，再进入 Prefill 或 Decode。Block KV 命中只说明一段前缀块可以复用，不自动等于“所有继续计算所需的状态都齐了”。本页把引擎内部的批次、KV 与异步尾部，接到生产请求、StateBlock 保存和两类重放上；最后说明为什么官方吞吐图上的某个工作点，不能直接搬到另一套配置。</p>
+          <h1 id="unit-title">命中之后，<br><span>还要走完资源账。</span></h1>
+          <p class="unit-hero__lede">一条生产请求先经过 Recipe 编码、Entrypoint 的缓存匹配与路由，再进入 Prefill 或 Decode。Block KV 命中只说明一段前缀块可以复用，不自动等于“所有继续计算所需的状态都齐了”。本页先补上集群侧的两笔账：总上下文 L 如何落进四档、命中 H 只改变哪些工作，以及 64P/64D 如何换算成实例与卡；再回到 StateBlock 生命周期、两类重放、角色收尾和官方工作点。</p>
           <dl class="unit-hero__facts" aria-label="本页阅读信息">
-            <div><dt>三层控制</dt><dd>入口路由 / Scheduler 批次 / EPLB 放置</dd></div>
-            <div><dt>三个数字</dt><dd>128 窗口 / 134 回退配置 / 140 推荐保留</dd></div>
-            <div><dt>两类重放</dt><dd>encoder SWA 恢复 / consumer 有界重放</dd></div>
+            <div><dt>分桶键</dt><dd>总上下文 L，不是新 suffix</dd></div>
+            <div><dt>P/D 资源</dt><dd>64 P + 64 D = 128 GPU</dd></div>
+            <div><dt>三个数字</dt><dd>128 窗口 / 134 回退 / 140 保留</dd></div>
           </dl>
         </div>
         <aside class="unit-map" aria-labelledby="unit-map-title">
           <div class="unit-map__head"><span id="unit-map-title">本页地图</span><span>点击直达</span></div>
           <ol>
             <li><a href="#path"><span class="num">01</span><span><strong>一条请求跨过哪些边界</strong><small>Recipe、Entrypoint、P/D 与三层控制权</small></span><span class="unit-map__state">路径图</span></a></li>
-            <li><a href="#state"><span class="num">02</span><span><strong>StateBlock 的三种生命周期</strong><small>请求内、P→D、跨请求保存</small></span><span class="unit-map__state">对象账</span></a></li>
-            <li><a href="#replay"><span class="num">03</span><span><strong>两类重放与三个数字</strong><small>128 / 134 / 140 各自是什么</small></span><span class="unit-map__state">可调对照</span></a></li>
-            <li><a href="#roles"><span class="num">04</span><span><strong>角色组合与最后 flush</strong><small>COMPLETION 为什么不能重算</small></span><span class="unit-map__state">时间线</span></a></li>
-            <li><a href="#points"><span class="num">05</span><span><strong>官方图与六个工作点</strong><small>坐标、条件、离散读数</small></span><span class="unit-map__state">读图</span></a></li>
+            <li><a href="#route"><span class="num">02</span><span><strong>四档分桶与两维 Decode 负载</strong><small>L / H / q / c、边界、官方 quota 与公开预算</small></span><span class="unit-map__state">分桶尺</span></a></li>
+            <li><a href="#pools"><span class="num">03</span><span><strong>P/D 实例不是卡数</strong><small>64P+64D、EP/DP 同卡组、32/16/8 实例</small></span><span class="unit-map__state">资源账</span></a></li>
+            <li><a href="#state"><span class="num">04</span><span><strong>StateBlock 的三种生命周期</strong><small>请求内、P→D、跨请求保存</small></span><span class="unit-map__state">对象账</span></a></li>
+            <li><a href="#replay"><span class="num">05</span><span><strong>两类重放与三个数字</strong><small>128 / 134 / 140 各自是什么</small></span><span class="unit-map__state">可调对照</span></a></li>
+            <li><a href="#roles"><span class="num">06</span><span><strong>角色组合与最后 flush</strong><small>COMPLETION 为什么不能重算</small></span><span class="unit-map__state">时间线</span></a></li>
+            <li><a href="#points"><span class="num">07</span><span><strong>官方图与六个工作点</strong><small>坐标、条件、离散读数</small></span><span class="unit-map__state">读图</span></a></li>
           </ol>
           <p class="unit-map__foot">源码事实、官方生产描述、教学算例与官方 benchmark 估算分别标注；本页没有 GPU 运行数据。</p>
         </aside>
@@ -95,11 +99,13 @@
       <div class="unit-contract">
         <span>读完之后，你应该能回答</span>
         <ul>
-          <li>为什么 Block KV 命中后仍可能重放，重放只重建了什么</li>
-          <li>encoder SWA 缺失恢复与 consumer/decoder 有界重放，出口有什么不同</li>
-          <li>入口 LB、Scheduler 和 EPLB 各自决定哪类对象，为什么不能画成一个调度器</li>
+          <li>为什么 L=64K、H=60K 与 L=64K、H=0 同属第三档，命中不改变分桶</li>
+          <li>为什么 A 与 C 都有 4K 后缀，却不能只凭后缀断言同成本</li>
+          <li>Decode 为什么同时看请求数和总 KV，示例为什么只是启发式倾向</li>
+          <li>官方 compute-quota / cost(q,c) 与公开 Scheduler 的 token 预算为什么不能合并</li>
+          <li>16P×EP4 + 1D×EP64 如何仍是 128 卡，EP/DP 为什么不能相乘</li>
+          <li>命中恢复为什么不能按 0 成本，两类重放分别修什么</li>
           <li>为什么“没有待调度请求”不等于“结果都已交付”</li>
-          <li>为什么 DSpark 的 16 并发负收益不能被归因于单一因素，官方收益也不能改写成普遍加速比</li>
         </ul>
       </div>
     </div>
@@ -114,27 +120,37 @@
   <section class="prod-purpose-band" id="why" aria-labelledby="why-title">
     <div class="wrap">
       <div class="prod-purpose-band__head">
-        <strong id="why-title">先看用途 / 四个问题各对应一条机制</strong>
+        <strong id="why-title">先看用途 / 六个问题各对应一条机制</strong>
         <span>不先展开推导；点卡片进入对应证据</span>
       </div>
-      <div class="prod-purpose">
-        <a href="#state">
-          <span>问题 1 · 缓存</span>
-          <strong>命中为什么还要重放？</strong>
-          <p>Block KV 与 SWA state 是不同对象；<b>命中前缀块</b>不等于<b>继续生成所需状态</b>已就绪。</p>
-        </a>
-        <a href="#replay">
-          <span>问题 2 · 恢复</span>
-          <strong>两类重放各修什么？</strong>
-          <p>encoder 缺 SWA 时只在命中区内重建末尾窗口；consumer 只为 Decode 准备后缀状态，<b>出口不同</b>。</p>
-        </a>
+      <div class="prod-purpose prod-purpose--six">
         <a href="#path">
-          <span>问题 3 · 控制</span>
+          <span>问题 1 · 控制</span>
           <strong>谁决定请求去哪？</strong>
           <p>入口 LB 选实例/rank，Scheduler 选批次/预算，EPLB 搬专家副本；<b>三层</b>。</p>
         </a>
+        <a href="#route">
+          <span>问题 2 · 分桶</span>
+          <strong>同样 4K 后缀，为什么不同桶？</strong>
+          <p>四档按<b>总上下文 L</b>分；命中 H 只改复用范围，<b>不把 L 变小</b>。</p>
+        </a>
+        <a href="#pools">
+          <span>问题 3 · 资源</span>
+          <strong>P/D 卡数 1:1，实例也 1:1？</strong>
+          <p>64P 卡按 EP 大小切成 32/16/8 个实例；D 侧是<b>一个 EP64 实例</b>。</p>
+        </a>
+        <a href="#state">
+          <span>问题 4 · 缓存</span>
+          <strong>命中为什么还要重放？</strong>
+          <p>Block KV 与 SWA state 是不同对象；<b>命中前缀块</b>不等于<b>状态已就绪</b>。</p>
+        </a>
+        <a href="#replay">
+          <span>问题 5 · 恢复</span>
+          <strong>两类重放各修什么？</strong>
+          <p>encoder 缺 SWA 时只重建末尾窗口；consumer 只为 Decode 准备后缀状态，<b>出口不同</b>。</p>
+        </a>
         <a href="#points">
-          <span>问题 4 · 性能</span>
+          <span>问题 6 · 性能</span>
           <strong>为什么不能泛化？</strong>
           <p>坐标、配置、并发和计数口径不同；16 并发的官方点是<b>负收益</b>，其余五个为正。</p>
         </a>
@@ -286,10 +302,211 @@
     </div>
   </section>
 
-  <section class="mech" id="state" aria-labelledby="state-title">
+  <section class="mech" id="route" aria-labelledby="route-title">
     <div class="wrap">
       <header class="mech-head">
         <div class="mech-head__no"><span>M14</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--deploy">官方生产描述</span><span class="tag tag--sim">K=1024 教学口径</span><span class="mech-time">约 9 分钟 · 分桶 + 两层负载</span></div>
+          <h2 id="route-title">总上下文先进四档；命中只改这一档里要做的工作</h2>
+          <p class="mech-thesis">官方把 Prefill 请求按<strong>总上下文长度 L</strong>分成四档，而不是按未命中的 suffix 分。命中 H 决定多少前缀可以复用，L 决定请求属于哪一档；两者回答不同问题。进入单步后，官方生产描述在 32,768 token 单步预算内，用时间 quota 与 cost(q,c) 估算本轮 chunk；公开 Scheduler 则按剩余 token 预算裁剪。Decode 还要同时看请求数与总 KV，不能只数请求。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>读者问题</dt><dd>同样只剩 4K，为什么不一定同桶、同成本？</dd></div>
+          <div><dt>关键变量</dt><dd>总长 L、命中 H、已有前缀 c、本轮待算 q</dd></div>
+          <div><dt>边界</dt><dd>官方生产描述 ≠ 公开 Scheduler 的 token 预算</dd></div>
+        </dl>
+      </header>
+
+      <div class="mech-facts">
+        <div><dt>分桶输入</dt><dd>有效请求的已编码总长 L（L&gt;0）；教学令 K=1024</dd></div>
+        <div><dt>命中改变</dt><dd>可复用前缀 H；新 suffix = L−H</dd></div>
+        <div><dt>调度再定</dt><dd>单步 q 还受 32,768 token 上限、SWA 回退、分块与时间 quota 约束</dd></div>
+        <div><dt>不默认</dt><dd>匹配、fetch、swap-in、SWA 恢复不是 0 成本</dd></div>
+      </div>
+
+      <div class="route-rule" role="note" aria-label="分桶看 L；命中后新 suffix 精确为 L−H；本轮 q 由预算与恢复决定">
+        <div><span>分桶</span><strong>L → 四档之一</strong><small>只看有效请求的总上下文；命中不把请求搬到更小档</small></div>
+        <div><span>命中</span><strong>H → 可复用前缀</strong><small>新 suffix 精确为 L − H；本轮 q 另看预算与恢复</small></div>
+        <div><span>本轮 q</span><strong>q 由本轮预算与恢复决定</strong><small>q 是本轮单步实际计算量，受 32,768 token 上限与时间 quota 约束。无重放且 suffix 全装得下时，q 可以等于 L − H；无重放而装不下时更小；SWA 恢复需重放时还要计入重放段。</small></div>
+      </div>
+
+      <div class="bucket-board">
+        <div class="bucket-board__head"><div><strong>四档标尺</strong><span>示意宽度不按 token 比例；边界以 token 数为准</span></div><span class="tag tag--deploy">官方生产描述</span></div>
+        <div class="bucket-scale" role="img" aria-label="四档按有效请求的总上下文长度划分：1 到 16,383；16,384 到 65,535；65,536 到 262,143；262,144 起。A 与 B 的总长 64K，同在第三档；C 的 4K 在第一档；L=0 不是有效演示请求。">
+          <div class="bucket-band"><span>第 1 档</span><strong>&lt; 16K</strong><small>有效请求 1 – 16,383 tokens</small><em>C · L=4K</em></div>
+          <div class="bucket-band"><span>第 2 档</span><strong>[16K, 64K)</strong><small>16,384 – 65,535</small></div>
+          <div class="bucket-band bucket-band--hot"><span>第 3 档</span><strong>[64K, 256K)</strong><small>65,536 – 262,143</small><em>A / B · L=64K</em></div>
+          <div class="bucket-band"><span>第 4 档</span><strong>≥ 256K</strong><small>262,144 起</small></div>
+        </div>
+        <p class="bucket-boundary"><b>边界样本：</b>16,383→1 档 · 16,384→2 档 · 65,535→2 档 · 65,536→3 档 · 262,143→3 档 · 262,144→4 档。<b>首档只覆盖有效请求</b>，从 1 token 起；L=0 不是演示有效请求。<b>K=1024 是本站教学口径</b>；官方只写 K，边界按 token 数，不按十进制 KB。</p>
+      </div>
+
+      <div class="table-scroll">
+        <table class="prod-table">
+          <caption>同一 L 的 A/B，与同 suffix 的 C：分桶看 L，成本还看 c 与 q</caption>
+          <thead><tr><th scope="col">请求</th><th scope="col">总上下文 L</th><th scope="col">命中 H</th><th scope="col">新 suffix = L−H（精确）</th><th scope="col">所属档</th><th scope="col">已有前缀 c（教学）</th><th scope="col">本轮 q（条件上限）</th></tr></thead>
+          <tbody>
+            <tr><td><strong>A</strong><br><small>长前缀命中</small></td><td>64K = 65,536</td><td>60K = 61,440</td><td><strong>4K = 4,096</strong></td><td><strong>第 3 档</strong></td><td>≈ 60K</td><td><strong>≤ 4K*</strong></td></tr>
+            <tr><td><strong>B</strong><br><small>同总长、空命中</small></td><td>64K = 65,536</td><td>0</td><td>64K = 65,536</td><td><strong>第 3 档</strong></td><td>0</td><td><strong>≤ 32K*</strong></td></tr>
+            <tr><td><strong>C</strong><br><small>短请求、空命中</small></td><td>4K = 4,096</td><td>0</td><td><strong>4K = 4,096</strong></td><td>第 1 档</td><td>0</td><td><strong>≤ 4K*</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="route-small"><b>q 不是 suffix：</b>新 suffix 按 L−H 精确计算；q 是本轮单步要算的 token 数，还要经过 32,768 token 单步上限、时间 quota、分块与组内 all-reduce 裁剪。表中的 ≤ 上界以“无 SWA 回退、本轮仍有 32,768 token 单步预算、且未被时间 quota 或组内 all-reduce 更紧裁剪”为前提：A/C 的 suffix 只有 4K，所以 q ≤ 4K；B 的 suffix 虽是 64K，单步 q 仍 ≤ 32K。实际 q 可能更小；有 SWA 回退时还要把重放段计入 q。不能把 L−H 当最终执行量或计费命中量。</p>
+
+      <div class="route-insights">
+        <div><span>A vs B</span><strong>同一 L，同一档</strong><p>命中 60K 让 A 只剩 4K 新 suffix，B 仍是 64K；两者仍同属第 3 档。B 的 64K 不会一次全算，单步 q 还受 32K 上限约束。</p></div>
+        <div><span>A vs C</span><strong>同一 4K 后缀，c 不同</strong><p>都可能只剩 4K 要算，但 A 已有 60K 前缀、C 的前缀为 0；仅凭 suffix 不能断言 cost(q,c) 相同。</p></div>
+        <div><span>命中之后</span><strong>恢复不是 0 成本</strong><p>Block KV 可复用，但元数据匹配、fetch、swap-in、P→D 交接以及 SWA 缺失时的末尾重建仍在；详见下方状态与重放两节。</p></div>
+      </div>
+
+      <h3 class="route-subhead">从桶到单步：四个层次，各看不同输入</h3>
+      <div class="table-scroll">
+        <table class="prod-table route-table">
+          <thead><tr><th scope="col">层次</th><th scope="col">输入与产生的决定</th><th scope="col">边界 / 不要混用</th></tr></thead>
+          <tbody>
+            <tr><td><strong>1 · Prefill 分桶</strong></td><td>输入总上下文 L，落入四档；上一轮各档 compute-quota 需求份额用于重新分配引擎，各档有独立批次 quota 上限。</td><td>不按 <code>L−H</code> 分档；K=1024 是教学口径。</td></tr>
+            <tr><td><strong>2 · DP 组之间</strong></td><td>各引擎按剩余 quota 拉取工作。共享 Block KV 让任意引擎都能命中任意前缀，官方因此不做前缀亲和路由。</td><td>需要外部共享缓存且可达；不能推广为所有引擎都不需要 cache-aware routing。</td></tr>
+            <tr><td><strong>3 · DP 组内</strong></td><td>到达请求交给 quota 负载最低的 rank；与 EPLB 选择专家副本不是同一件事。</td><td>quota 负载不是“请求数排行榜”，也不是 MFU。</td></tr>
+            <tr><td><strong>4 · 单 GPU 的一个 Prefill step</strong></td><td>FIFO 请求、时间 quota、q/c 成本估计；官方描述用拟合的二次 cost(q,c) 求允许的 chunk，在 32,768 token 单步上限内取最大 q，组内 all-reduce MIN 再限制预算。</td><td>系数、拟合方法和完整生产实现未公开；公开 Scheduler 只确认 token 预算与 CP 对齐。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="budget-split">
+        <article class="budget-card budget-card--official">
+          <span>官方生产描述</span>
+          <h3>时间 quota + cost(q,c)</h3>
+          <p>先按上一轮各档 compute-quota 需求份额重分引擎；引擎内再用 <code>cost(q,c)</code> 估本轮允许的 chunk，并在官方 32,768 token 单步上限内取最大 q。组内 all-reduce MIN 还会再收紧预算。</p>
+          <p><b>公开代码边界：</b>本快照的 <code>csrc/</code>、<code>deepinfer/</code> 中未找到 <code>compute_quota</code> / <code>cost(q</code> 的实现；不能补出虚构系数、毫秒或最优 chunk。</p>
+        </article>
+        <div class="budget-vs" aria-hidden="true">≠</div>
+        <article class="budget-card budget-card--public">
+          <span>公开 Scheduler</span>
+          <h3>剩余 token 预算 + CP 对齐</h3>
+          <p><code>_schedule_prefill</code> 用 <code>max_num_batched_tokens - num_batched_tokens</code> 与 CP 对齐裁剪 <code>seqlen_q</code>。</p>
+          <p><b>它能证明：</b>token 预算会截断本轮 query 行；<b>不能证明：</b>生产时间 quota 的系数、排队时延或全局最优路由。</p>
+        </article>
+      </div>
+
+      <h3 class="route-subhead">Decode：请求数只是其中一个维度</h3>
+      <div class="decode-board">
+        <article class="decode-card decode-card--a">
+          <span>A 卡 · 低并发、大历史</span>
+          <strong>4 <small>条请求</small></strong>
+          <b>累计 KV 512K</b>
+          <p>每步 batch 较小，但累计 512K KV 让 attention 与 KV 读取更重；短请求看低并发可能偏向这里。</p>
+        </article>
+        <div class="decode-tilt" aria-label="启发式倾向：短请求可能偏向 A，长请求可能偏向 B">
+          <div><span>短请求</span><strong>可能倾向 A</strong><small>A 只有 4 条，KV 虽大</small></div>
+          <div><span>长请求</span><strong>可能倾向 B</strong><small>B 有 16 条，KV 只 64K</small></div>
+        </div>
+        <article class="decode-card decode-card--b">
+          <span>B 卡 · 高并发、小历史</span>
+          <strong>16 <small>条请求</small></strong>
+          <b>累计 KV 64K</b>
+          <p>请求多、总 KV 少；只看请求数会偏向 4 条的 A，并忽略 A 的 512K KV。把两维一起看，长请求才可能偏向这里。</p>
+        </article>
+      </div>
+      <p class="route-caveat"><b>这是启发式倾向，不是生产路由结果：</b>官方同时看请求数与总 KV 长度；只看请求数会偏向 4 条的 A，忽略 A 的 512K KV。没有公布可照搬的打分系数；实际选择还受容量、服务状态与共享缓存可达性约束。本页不据此预测 TTFT、吞吐或最优路由。</p>
+
+      <p class="source-attrib">分桶、quota 与两维负载见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L107-L119" target="_blank" rel="noopener noreferrer">Q&amp;A:107–119</a>；共享缓存前提见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L129-L141" target="_blank" rel="noopener noreferrer">Q&amp;A:129–141</a>；公开 token 预算裁剪见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/scheduler.hpp#L460-L490" target="_blank" rel="noopener noreferrer">scheduler.hpp:460–490</a>；chunk 预算细节见 <a href="scheduling.html#chunk">请求与调度页的 4/4/2</a>。</p>
+    </div>
+  </section>
+
+  <section class="mech" id="pools" aria-labelledby="pools-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M15</span><i aria-hidden="true"></i></div>
+        <div>
+          <div class="mech-kicker"><span class="tag tag--deploy">官方生产描述</span><span class="tag tag--sim">教学算术</span><span class="mech-time">约 7 分钟 · 资源账</span></div>
+          <h2 id="pools-title">64P + 64D 是 128 张卡；P 的实例数取决于 EP，不是另一笔扩容</h2>
+          <p class="mech-thesis">P/D 的 GPU 卡数约 1:1，不意味着实例数 1:1。一个实例是协同完成 P 或 D 的一组 rank，可跨多张卡。EP 与 DP 是<strong>同一组卡的不同视图</strong>，不能相乘：64 张 P GPU 用 EP4 是 16 个实例、每个 4 卡；64 张 D GPU 是一个 EP64 实例。总卡数仍是 128。</p>
+        </div>
+        <dl class="mech-meta">
+          <div><dt>读者问题</dt><dd>为什么卡数 1:1，实例数却可以是 16:1？</dd></div>
+          <div><dt>单位</dt><dd>GPU / rank / 引擎实例 / 路由资源池</dd></div>
+          <div><dt>前提</dt><dd>每个 P 实例的 HBM 足以装下所选 EP 规模</dd></div>
+        </dl>
+      </header>
+
+      <div class="mech-facts">
+        <div><dt>GPU</dt><dd>实际计算设备；本例一 rank 对一 GPU</dd></div>
+        <div><dt>rank</dt><dd>组内执行参与者，不是服务实例</dd></div>
+        <div><dt>实例</dt><dd>协同完成 P 或 D 的一组 rank，可跨卡跨机</dd></div>
+        <div><dt>池</dt><dd>可供入口选择的多个实例，不是更大的 EP collective</dd></div>
+      </div>
+
+      <div class="table-scroll">
+        <table class="prod-table">
+          <caption>四个名称：同一张资源账上的不同单位</caption>
+          <thead><tr><th scope="col">名称</th><th scope="col">本节含义</th><th scope="col">不要混淆</th></tr></thead>
+          <tbody>
+            <tr><td><strong>GPU</strong></td><td>实际计算设备；本节例子一 rank 对一 GPU。</td><td>不等于一个服务实例。</td></tr>
+            <tr><td><strong>rank</strong></td><td>分布式执行参与者，具有组内身份。</td><td>DP/EP 是同一批设备的不同视图，不应把 EP×DP 乘成 GPU 数。</td></tr>
+            <tr><td><strong>引擎实例</strong></td><td>协同完成 P 或 D 阶段的一组 rank。</td><td>一个实例可跨多卡多机；1P+1D 不等于两张卡。</td></tr>
+            <tr><td><strong>路由资源池</strong></td><td>可供入口选择的多个实例。</td><td>不等于把所有设备合成一个更大的 EP collective。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pool-board">
+        <div class="pool-board__head"><div><strong>以 EP4 为例：64 张 P 卡切成 16 个实例</strong><span>每个小格是一个 P 实例（4 张 GPU），不是一张卡；D 的整条是一个 EP64 实例。实例数与 GPU 数分两笔账。</span></div><span class="tag tag--sim">教学组合</span></div>
+        <div class="pool-equation" role="group" aria-label="实例账与 GPU 账分开计算">
+          <div class="pool-eq-card">
+            <div class="pool-eq-card__head"><span>实例账</span><small>单位：个</small></div>
+            <div class="pool-eq-row"><span>P 池</span><strong>64 ÷ 4 = 16</strong><small>64 GPU ÷ 4 GPU/实例 = 16 个 P 实例</small></div>
+            <div class="pool-eq-row"><span>D 池</span><strong>64 ÷ 64 = 1</strong><small>64 GPU ÷ 64 GPU/实例 = 1 个 D 实例</small></div>
+            <div class="pool-eq-total"><span>合计</span><strong>16 + 1 = 17</strong><small>17 个 P/D 引擎实例</small></div>
+          </div>
+          <div class="pool-eq-card">
+            <div class="pool-eq-card__head"><span>GPU 账</span><small>单位：张</small></div>
+            <div class="pool-eq-row"><span>P 池</span><strong>16 × 4 = 64</strong><small>16 个 P 实例 × 4 GPU = 64 张</small></div>
+            <div class="pool-eq-row"><span>D 池</span><strong>1 × 64 = 64</strong><small>1 个 D 实例 × 64 GPU = 64 张</small></div>
+            <div class="pool-eq-total"><span>总 GPU</span><strong>64 + 64 = 128</strong><small>128 张 GPU，卡数不变</small></div>
+          </div>
+        </div>
+        <div class="pool-lanes">
+          <div class="pool-lane">
+            <div class="pool-lane__label"><span>P 池 · 64 GPU</span><small>16 个实例 × 4 卡；每个小格 = 1 实例</small></div>
+            <div class="pool-track pool-track--p" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="pool-lane">
+            <div class="pool-lane__label"><span>D 池 · 64 GPU</span><small>1 个 EP64 实例；整条不是 64 个实例</small></div>
+            <div class="pool-track pool-track--d" aria-hidden="true"><i>1 × EP64</i></div>
+          </div>
+        </div>
+        <p class="pool-board__foot"><b>P:D 实例数 = 16:1。</b>卡数仍是 64:64；D 的 EP64/DP64 说的是同一个 64 卡实例的两种视图，不是 64×64 张卡。</p>
+      </div>
+
+      <div class="table-scroll">
+        <table class="prod-table pool-table">
+          <caption>固定 P 池 64 GPU、D 池 64 GPU 的算术展开（CP=1，EP=DP）</caption>
+          <thead><tr><th scope="col">每个 P 实例规模</th><th scope="col">P 实例数</th><th scope="col">每个 D 实例 / 数量</th><th scope="col">总 GPU</th><th scope="col">P:D 实例数</th></tr></thead>
+          <tbody>
+            <tr><td>EP2 / DP2：2 GPU</td><td><strong>32</strong></td><td>EP64 / DP64：64 GPU，1 个</td><td>128</td><td>32:1</td></tr>
+            <tr class="is-current"><td>EP4 / DP4：4 GPU（上图）</td><td><strong>16</strong></td><td>EP64 / DP64：64 GPU，1 个</td><td>128</td><td>16:1</td></tr>
+            <tr><td>EP8 / DP8：8 GPU</td><td><strong>8</strong></td><td>EP64 / DP64：64 GPU，1 个</td><td>128</td><td>8:1</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pool-notes">
+        <article><span>视图，不是乘法</span><strong>EP4/DP4 仍是 4 张卡</strong><p>EP 看专家分片，DP 看请求/批次；同一组 4 个 rank 同时属于两种组。把 4×4 当卡数会凭空多出 12 张卡。</p></article>
+        <article><span>HBM 前提</span><strong>每个 P 实例要装得下模型</strong><p>“EP2 能切成 32 个实例”以每个实例 HBM 足够为前提；容量不足时不能照搬，且 64P+64D 不是所有硬件的硬下限。</p></article>
+        <article><span>不是唯一推荐</span><strong>EP4 是教学展开</strong><p>官方描述 P 用 EP2–8、D 用 Wide-EP EP64–128，并以 64P+64D 为较小的高效部署单元；本站不把它写成唯一推荐，也不从卡数反推吞吐或 MFU。</p></article>
+      </div>
+
+      <p class="route-small"><b>为什么这样分工：</b>P 的新输入可形成较大工作量，小 EP 减少不必要的跨设备组织；D 每条请求每轮生成工作较小，Wide-EP 与专家负载均衡降低专家权重相关的每步访存压力。收益仍受通信、拓扑、HBM、并发与上下文影响。逻辑专家如何映射到这批物理卡，见 <a href="model.html#parallel">模型页的并行视图</a>；官方工作点的条件见 <a href="#points">本页性能工作点</a>。</p>
+      <p class="source-attrib">P/D 角色、EP/DP 范围与约 1:1 GPU 比例见 <a href="https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L45-L67" target="_blank" rel="noopener noreferrer">Q&amp;A:45–67</a>。表中实例数是本站按 64P/64D 与 EP=DP 的算术展开，不是压测结论或官方唯一推荐配置。</p>
+    </div>
+  </section>
+
+  <section class="mech" id="state" aria-labelledby="state-title">
+    <div class="wrap">
+      <header class="mech-head">
+        <div class="mech-head__no"><span>M16</span><i aria-hidden="true"></i></div>
         <div>
           <div class="mech-kicker"><span class="tag tag--source">源码布局</span><span class="tag tag--deploy">官方保存策略</span><span class="mech-time">约 7 分钟 · 对象与生命周期</span></div>
           <h2 id="state-title">stored / dropped 是保存范围，不是“磁盘 / 内存”</h2>
@@ -363,7 +580,7 @@
   <section class="mech" id="replay" aria-labelledby="replay-title">
     <div class="wrap">
       <header class="mech-head">
-        <div class="mech-head__no"><span>M15</span><i aria-hidden="true"></i></div>
+        <div class="mech-head__no"><span>M17</span><i aria-hidden="true"></i></div>
         <div>
           <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--sim">教学算例</span><span class="mech-time">约 9 分钟 · 两类重放 + 可调对照</span></div>
           <h2 id="replay-title">都叫“重放”，修的却不是同一个对象</h2>
@@ -545,7 +762,7 @@
   <section class="mech" id="roles" aria-labelledby="roles-title">
     <div class="wrap">
       <header class="mech-head">
-        <div class="mech-head__no"><span>M16</span><i aria-hidden="true"></i></div>
+        <div class="mech-head__no"><span>M18</span><i aria-hidden="true"></i></div>
         <div>
           <div class="mech-kicker"><span class="tag tag--source">源码事实</span><span class="tag tag--infer">配置边界</span><span class="mech-time">约 6 分钟 · 角色 + flush</span></div>
           <h2 id="roles-title">三种角色不是任意组合；没有待调度请求也不等于交付完毕</h2>
@@ -660,7 +877,7 @@ def default_zero_overhead_scheduling(self) -&gt; bool:
   <section class="mech" id="points" aria-labelledby="points-title">
     <div class="wrap">
       <header class="mech-head">
-        <div class="mech-head__no"><span>M17</span><i aria-hidden="true"></i></div>
+        <div class="mech-head__no"><span>M19</span><i aria-hidden="true"></i></div>
         <div>
           <div class="mech-kicker"><span class="tag tag--source">官方图表</span><span class="tag tag--infer">条件化读法</span><span class="mech-time">约 8 分钟 · 图 + 六个离散点</span></div>
           <h2 id="points-title">同一张图回答不了两个问题；同一个机制也不是每个工作点都更快</h2>
@@ -859,7 +1076,7 @@ def default_zero_overhead_scheduling(self) -&gt; bool:
       <a href="index.html#resources">资料下载</a>
       <a href="https://github.com/deepseek-ai/DeepInfer/tree/553741557a57df44a46fb3ab72b6aafeaf945337" target="_blank" rel="noopener noreferrer">上游固定版本 ↗</a>
     </div>
-    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-27 · 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
+    <p class="footer-meta">源码事实以 <code>5537415</code> 为准 · 分析日期 2026-10-27 · 补充 2026-10-29 · 无 GPU 实测 · 短段源码摘录遵循 Apache-2.0</p>
   </div>
 </footer>
 </body>

@@ -218,6 +218,20 @@ MQA 的评分形式是 `relu(q @ k) * weights` 的多头加权结果；这是用
 
 **配置边界。** 生产 Q&A 的 prefill 100-step 窗口/1000-step 重排与 decode 1000/10000 等参数仅作官方部署例子（`doc/inference_deployment_qa.md:95`）；公开源码默认/实际配置必须另行读取。物理槽位总数需整除 EP size，`resolve_num_extra_experts` 会做补齐（`deepinfer/model_executor/eplb/__init__.py:21`）。
 
+### 统计窗口、重排周期与冷启动（2026-10-29 补充）
+
+读者要能区分三个动作：每个符合条件的 step 收集专家 token 计数；保存最近 N 个 step 的统计；到达周期 M 才重排副本并搬权重。N 说明“参考多长历史”，M 说明“多久采取一次动作”。它们不是毫秒，也不是请求数；token 计数是负载代理，不是运行时间或 MFU。
+
+[源码构造与计数](https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/eplb/__init__.py#L102-L144)要求重排开启时 `1 <= N <= M`；M=0 时关闭重排。[更新条件](https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/eplb/__init__.py#L146-L165)先写入环形统计窗，再判断是否达到周期。不要画成每步都搬权重，也不要把“关闭重排”画成关闭所有统计：负载统计另有调用。
+
+**冷启动不是等满一个 M。** 构造时设置 `initial_delay=max(1,M//4)`，首次提前重排；之后常规计数每 M 个符合条件的 step 重排。若取官方 P 的 N=100、M=1000，并简化为专用 P 引擎每步均参与，则第一次为第 250 步，后面为 1250、2250……；观察满窗后的某次重排，只使用最近 100 步，而不是累计过去所有 step。官方 D 的 N=1000、M=10000 对应首次 2500、之后 12500……。这是将官方参数代入公开代码的条件化推导，不是生产 trace。
+
+`NORMAL` 模式还有 Prefill 分支：[L83–84](https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/eplb/__init__.py#L83-L84) 与更新条件决定跳过 Prefill 的重排统计，或在 Prefill 后安排下一非 Prefill step 重排；EP<=1 则提前返回。因此不能把上述编号泛化为任意运行模式的全局 step 编号。
+
+**反例与取舍。** 相同的最新 100 步统计，M=1000 与 M=2000 不代表每次算出的热点一定不同，但决定何时采用新的放置。更短 M 可更快响应热点，也增加权重搬运和同步成本；更长 N 提供更长历史，也可能保留已经过时的热点。这里只解释取舍，不声称某组参数普遍最优。生产 P 的 100/1000、D 的 1000/10000 是[官方部署参数](https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L95-L103)，不是自动按 P/D 角色设置的统一源码默认值。窗口默认 100 见 `deepinfer/environ.py:122`。
+
+页面已有“先搬权重，再切 map”的静态图；这里只需接上统计和动作的时间关系。若呈现时间线，必须注明是否省略冷启动、采用哪种 engine role，并给出依据。静态表达或条件交互由实现者按学习问题选择。
+
 **验证方法。** 保留逐步 token 分布、rank latency、shuffle 耗时/频率和额外 HBM；用相同请求重放比较“关闭重排/固定布局/启用重排”，看端到端收益能否覆盖搬权重成本。不能只展示重排后某一步的漂亮柱状图。
 
 **交互建议。** 左边 logical expert 固定不变，右边 physical slots 可移动/复制；上方显示 histogram，点击“重排”后同时改变权重位置和 map。把复制成本和等待减少分开显示。

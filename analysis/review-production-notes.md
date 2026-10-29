@@ -44,6 +44,68 @@ ZOS 基本顺序、DP/EP/EPLB 基础、YOCO 三模式、结构化输出、确定
 
 本记录的初次核验只确认可采纳材料与分析方法，对应规则已写入根目录 `AGENTS.md`。2026-10-27 后续按用户要求实施为 [生产恢复章节](../production.html)：请求与缓存路径、StateBlock 生命周期、两类重放、角色与 flush、官方图读法及 DSpark 工作点；具体教学依据见 [production-mechanisms.md](production-mechanisms.md)，验收范围见 [verification.md](verification.md)。
 
+## 2026-10-29：直接阅读原文后的增量复核
+
+**结论：这不是一篇新的材料来源。** 用户此次提供的链接，正是上述学习文档的原文。其核心内容已进入本站；有价值的后续补充主要在集群负载均衡和部署规模，不需要再建一套缓存恢复、ZOS 或 DSpark 课程。
+
+本轮按 ai-infra-wiki 的第三方资料规则执行：直接读取原文及重要配图，再检查旧资料、固定源码与现有页面；将可支持的补充选题和未公开实现分开。此次只更新核验记录，未撰写候选专题正文，未修改或发布前端。
+
+### 阅读与比对范围
+
+- 原文：《DeepInfer框架分析笔记》，kaiyuan / InfraTech。页面元数据 `ct=1793014200` 对应 2026-10-26 19:30（Asia/Shanghai），本轮读取日期为 2026-10-29。
+- 已直接提取 `js_content` 全文，读到第 13 节、结语及参考文献；正文 9 张图片中，7 张为技术图，另外 2 张为关注引导和二维码。
+- 七张技术图的 URL 与 ai-infra-wiki 已有来源记录一致，本地图片 SHA-256 与其清单一致，并逐张阅读。模型组件图仍有执行顺序误导，不能直接复用为源码图；两张性能图必须保留配置和指标口径。未重新下载或向本站复制第三方图片。
+- 源码仍固定为 `553741557a57df44a46fb3ab72b6aafeaf945337`，只读且工作区干净。没有重新定义上游最新版本，也没有 GPU 实测。
+- 站点基线为 `29de3ad9b389600195cca13bec85ee157ef8d560`。本轮下载比较了线上八个 HTML 页面及 `assets/production.js`，均与本地字节一致。因此下列判断针对当前已发布内容，不只针对旧分析稿。
+
+### 已覆盖的内容：保持现状
+
+| 原文主线 | 当前页面 | 复核结论 |
+| --- | --- | --- |
+| 模块分层、请求进入引擎、分块和投票 | [总览](../index.html)、[请求调度](../scheduling.html#req) | 已有模块职责、对象流转、源码摘录和边界，原文目录表没有提供更深的增量。 |
+| ZOS、在途结果、最终 flush、角色限制 | [运行时](../runtime.html)、[角色与收尾](../production.html#roles) | 当前内容已解释 N/N−1、COMPLETION 重算限制和最后一轮，保留。 |
+| Block KV / SWA、stored / dropped、两类重放 | [状态生命周期](../production.html#state)、[恢复](../production.html#replay) | 已区分复用块与重建状态、近似恢复以及 128/134/140；比直接转述原文更明确。 |
+| CED/YOCO、MoE、Mega MoE、EPLB | [模型与并行](../model.html#parallel)、[分析依据](model-parallel.md) | 现有页面包含完整返回路径、融合条件和专家副本映射，不需要重复增加概览动画。 |
+| DSpark、结构化输出、确定性 | [输出机制](../sampling.html) | 已有机制和源码边界；原文不足以证明新的数值或质量结论。 |
+| Pareto 图与接受率换算 | [官方图读法](../production.html#points)、[性能口径](../performance.html#evidence) | 已保留低并发负收益及多变量对照限制，不能换成笼统“吞吐提升”结论。 |
+
+### 有实际增量的补充候选
+
+以下是选题与证据评估，尚未作为站点实现。每项应连接现有页面，而不是复制其正文。
+
+| 优先级 / 候选标题 | 核心问题、相对现状的增量 | 事实依据与边界 | 建议位置与表达任务 |
+| --- | --- | --- | --- |
+| 优先：从前缀命中到选卡——Prefill / Decode 负载均衡 | 现在只解释入口 LB 管实例/rank，未展开如何估计各 rank 的负载。补充 Prefill 四档上下文分桶、compute-quota、组间拉取、组内分配，以及 Decode 同时观察请求数和 KV 总长；说明共享缓存为什么能减轻前缀亲和对路由的约束。 | 原文第 13 节；[官方 Q&A:107–119][qa-routing]、[缓存共享前提:129–141][qa-shared-cache]。分桶边界为 <16K / 16–64K / 64–256K / ≥256K。成本模型与时间预算是官方生产描述；公开 Scheduler 可确认的是 token 预算等约束，不能把二者合成已公开的完整算法。 | 扩展 `production.html#path`，与 `scheduling.html#chunk` 互链；教学材料放 `analysis/production-mechanisms.md`。需要让读者辨认“总长度 / 新算长度 / 已有前缀”及“请求数 / KV 总长”各自回答什么，例子不伪造成本系数或路由最优性。 |
+| 优先：P/D 实例与 GPU 的资源账 | 原文的部署规模与现有 Wide-EP 图之间缺少桥梁。解释 P 小 EP、D 大 EP、实例数与卡数的区别，防止把“1P+1D”理解为“两张卡”或把 P:D 卡数比当实例比。 | 原文第 5、13 节；[官方 Q&A:45–67][qa-topology]。P 为 EP2–8，D 为 EP64–128；官方给出约 1:1 的 GPU 比例与 64 P GPU + 64 D GPU 的高效起点。这是该生产快照的配置依据，不是所有硬件、流量的最小可运行规模或性能承诺。 | 在 `production.html#path` 附近补资源示意，并连接 `model.html#parallel`。先用静态表区分 GPU、rank、实例与组；具体生产配比仍须硬件及负载验证，不把上轮服务化报告的试点建议改称官方配置。 |
+| 其次：EPLB 为什么看历史，而不每步搬权重 | 现有静态图已解释搬什么、何时切 map；可补统计窗口和重排周期为什么是两个不同参数，以及响应速度、统计噪声、搬运成本的取舍。该内容已在分析稿中，尚未充分呈现在页面。 | 原文第 5 节；[分析稿](model-parallel.md#机制-7eplb-复制热专家搬权重改映射)、[官方参数:95–103][qa-eplb-settings]、[执行条件:146–165][eplb-period]。官方 P 窗口/周期为 100/1000 step，D 为 1000/10000 step；不得写成所有模式的源码默认值。 | 补在 `model.html#parallel` 已有 EPLB 图旁，分析依据继续维护于 `analysis/model-parallel.md`。宜用统计窗与重排时点的简洁时间线，先解释机制；不需要再做一套专家搬运动画。 |
+
+第一个候选最能补齐“缓存命中 → 负载估计 → 请求去向 → 单步预算”的因果链；第二个能澄清部署单位；第三个适合小幅增补。没有必要仅因阅读了原文再创建一篇全量框架综述。
+
+### 原文中不能原样采用的判断
+
+| 表述或图示 | 核验后的处理 |
+| --- | --- |
+| 前文将 Recipe 列入未开源组件，后文又提到其独立仓库 | 本轮确认 [官方 Recipe 仓库](https://github.com/deepseek-ai/deepseek-recipe) 公开可访问。本站继续标为独立项目；“不在 DeepInfer 仓内”不等于未开源。 |
+| 末段称本仓 `LLM` 只接收已分好的 token | [文本入口:153–157][llm] 明确保留 `tokenizer.encode(prompt)`；本站已有文本/IDs 两条路径，不跟随原文改窄。 |
+| 组件图把 Engram 排在 MoE 后 | [实际调用:111–145][layer] 将 Engram 作为 `attn_norm_forward` 的干预 hook；原图不作为执行顺序证据。 |
+| 将 SWA 窗口约写成 134，或把有界重放理解为与层数完全无关 | 窗口、回退余量和保留后缀分别解释；[ring 计算][ring] 是窗口加回退。官方问答本身也使用了“与层数无关”的简写，但[模型前向:190–215][model-layer-loop]仍逐层执行；应限定为控制重放长度及恢复依赖范围，不能推出运行耗时不受层数影响。 |
+| 猜测基于 vLLM 的具体历史版本、未开放原因，以及专用框架维护一定更容易 | 缺少可验证依据或统一比较尺度，不纳入源码事实。生产营收、集群规模也不用于证明某个引擎机制的独立收益。 |
+
+本轮未发现需要立即改写已发布机制结论的新证据。真正值得推进的是上述补充选题；其公开实现缺口应继续保留，不能以教学可视化补出一个不存在的生产调度器。
+
+### 2026-10-29：经用户授权后的实施结果
+
+上述三个候选已补入现有章节：[Prefill / Decode 生产路由](../production.html#route)、[P/D 实例与 GPU 资源账](../production.html#pools)、[EPLB 统计窗口与重排周期](../model.html#eplb-cycle-title)。相关分析同步维护于 `production-mechanisms.md` 第 6、7 节及 `model-parallel.md` 机制 7。采用静态分档、对照表与时间线，保留原有交互，不复制文章图片或完整引擎源码。
+
+验收特别区分了新 suffix 与本轮 q、请求数与累计 KV、实例数与 GPU 数，以及统计更新次数与重排动作次数。官方参数代入源码产生的 EPLB 冷启动时点属于条件化推导；部署比例不升级为所有硬件的推荐配比。具体页面、源码链接与浏览器核验见[发布核验记录](verification.md)。上面的“候选”与“尚未实现”保留为实施前评估记录。
+
+[qa-routing]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L107-L119
+[qa-shared-cache]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L129-L141
+[qa-topology]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L45-L67
+[qa-eplb-settings]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L95-L103
+[eplb-period]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/eplb/__init__.py#L146-L165
+[model-layer-loop]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/model_executor/models/deepseek.py#L190-L215
+
 [readme-scope]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/README.md#L38-L42
 [qa-scope]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/doc/inference_deployment_qa.md#L19-L35
 [hooks]: https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/deepinfer/engine/llm_engine.py#L800-L822

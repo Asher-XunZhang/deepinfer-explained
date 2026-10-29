@@ -614,6 +614,7 @@ return self.llm_engine.add_request(
             <li><b>第三轮之后</b><span><strong>首 token 已采样，但还没 forward。</strong>此时 <code>len</code> 已加 1，而 <code>cache.num_tokens</code> 仍是 10；下一 decode 的 q=1 才处理这个新 token。</span></li>
           </ol>
           <p class="source-bridge"><b>首 token 时刻的准确说法：</b>不是“第一个 chunk 开始”就产出，也不是“prompt 长度除以预算”的纯数学结果；必须看本轮是否覆盖完 prompt、是否被资源条件截断，以及本步是否真的是最后 chunk。</p>
+          <p class="source-bridge"><b>与生产路由分开：</b>这里的 token 预算是公开 Scheduler 的裁剪；生产 Q&amp;A 的 compute-quota / cost(q,c) 是另一层官方描述，见 <a href="production.html#route">生产页的分桶与路由</a>。</p>
           <p class="source-attrib">源码事实来自固定 SHA；教学表的 4/4/2 是缩小算例，不是性能测试。</p>
         </div>
       </div>

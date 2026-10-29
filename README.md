@@ -12,7 +12,7 @@
 4. `model.html`：Flash 模型结构、稀疏/压缩注意力、YOCO、MoE、EPLB、并行与 kernel。
 5. `sampling.html`：采样、DSpark、动态草稿预算、结构化输出。
 6. `performance.html`：MFU 口径与交互算例、性能验证路径、公开代码与生产系统的边界。
-7. `production.html`：请求 / 缓存双轨、StateBlock 生命周期、两类重放、角色与 flush，以及条件化工作点。
+7. `production.html`：生产路由与 Prefill 分桶、P/D 实例与卡数、请求 / 缓存双轨、StateBlock 生命周期、两类重放、角色与 flush，以及条件化工作点。
 8. `atlas.html`：KV 内存布局、跨层复用来源与 YOCO 的 SWA 可见域静态对照。
 
 结构和布局用完整静态图呈现；参数对照用轻量交互；有时间依赖的机制提供连续播放、暂停和回看。运动时间和小尺寸数据是教学示意，不是硬件 trace；网站保留无脚本正文与源码链接。本仓没有 GPU 推理或性能实测数据。
